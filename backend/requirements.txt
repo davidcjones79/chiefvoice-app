@@ -1,0 +1,5 @@
+pipecat-ai[daily,deepgram,elevenlabs,openai,piper]
+python-dotenv
+loguru
+aiohttp
+websockets

@@ -1,0 +1,54 @@
+appId: com.chief.desktop
+productName: Chief
+copyright: Copyright © 2024
+
+directories:
+  output: dist-electron
+  buildResources: electron
+
+files:
+  - electron/**/*
+  - out/**/*
+  - "!node_modules/**/*"
+  - node_modules/electron/**/*
+
+extraMetadata:
+  main: electron/main.js
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  icon: electron/icon.icns
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: electron/entitlements.mac.plist
+  entitlementsInherit: electron/entitlements.mac.plist
+
+dmg:
+  backgroundColor: "#faf7f2"
+  window:
+    width: 540
+    height: 380
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: electron/icon.ico
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: Utility
+  icon: electron/icons
+
+# Note: Run "npm run build" manually before electron:build if you need static files
+# For production mode, we load from the hosted server so no build needed

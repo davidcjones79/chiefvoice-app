@@ -1,0 +1,4 @@
+davids-mac-mini-1.bunny-bleak.ts.net:8443 {
+    tls /Users/davidjones/projects/chief/davids-mac-mini-1.bunny-bleak.ts.net.crt /Users/davidjones/projects/chief/davids-mac-mini-1.bunny-bleak.ts.net.key
+    reverse_proxy localhost:3001
+}
