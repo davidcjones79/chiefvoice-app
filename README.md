@@ -75,6 +75,63 @@ python chief_bot.py <daily_room_url> [call_id]
 - **Pipecat Bot** manages the voice pipeline: STT → LLM → TTS, with optional ChiefVoice Gateway routing
 - **ChiefVoice Gateway** provides AI agent access to tools, integrations, and memory
 
+## Production Deployment
+
+Both the frontend and Gateway run on a Vultr VPS (`voice01`), locked down to Tailscale-only access.
+
+### Access
+
+- **Frontend:** `http://voice01:3000` (Tailscale only)
+- **Gateway:** `http://voice01:8000` (Tailscale only)
+
+### Systemd Services
+
+```bash
+# Frontend
+sudo systemctl status chiefvoice-app
+sudo systemctl restart chiefvoice-app
+sudo journalctl -u chiefvoice-app -f
+
+# Gateway
+sudo systemctl status chiefvoice-gateway
+sudo systemctl restart chiefvoice-gateway
+sudo journalctl -u chiefvoice-gateway -f
+```
+
+### After code changes
+
+```bash
+cd /root/chiefvoice-app
+git pull
+npm install
+npm run build
+sudo systemctl restart chiefvoice-app
+```
+
+### Security (three layers)
+
+1. **Bind address** -- both services listen only on `100.84.13.66` (Tailscale IP), unreachable from public internet
+2. **UFW firewall** -- ports 3000 and 8000 only allow `100.64.0.0/10` (Tailscale CGNAT range)
+3. **Vultr cloud firewall** -- only allows UDP 41641 (Tailscale WireGuard), drops all other inbound traffic
+
+### UFW Rules
+
+```
+22/tcp    ALLOW IN  100.64.0.0/10   # SSH - Tailscale only
+3000/tcp  ALLOW IN  100.64.0.0/10   # Chief frontend - Tailscale only
+8000/tcp  ALLOW IN  100.64.0.0/10   # ChiefVoice Gateway - Tailscale only
+Default: deny incoming
+```
+
+### Vultr Cloud Firewall
+
+| Protocol | Port  | Source   | Purpose             |
+|----------|-------|----------|---------------------|
+| UDP      | 41641 | Anywhere | Tailscale WireGuard |
+| *        | *     | *        | DROP (default deny) |
+
+Emergency access via Vultr web console (VNC) if Tailscale is down.
+
 ## Platforms
 
 | Platform | Technology | Build Command |
