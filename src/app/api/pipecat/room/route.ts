@@ -6,6 +6,27 @@ import path from "path";
 const activeBots = new Map<string, ChildProcess>();
 const activeRooms = new Map<string, { url: string; name: string }>();
 
+/**
+ * Delete a Daily.co room via API. Fire-and-forget safe.
+ */
+async function deleteDailyRoom(roomName: string): Promise<void> {
+  const dailyApiKey = process.env.DAILY_API_KEY;
+  if (!dailyApiKey) return;
+  try {
+    const res = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
+      method: "DELETE",
+      headers: { "Authorization": `Bearer ${dailyApiKey}` },
+    });
+    if (res.ok) {
+      console.log(`[Pipecat API] Daily room deleted: ${roomName}`);
+    } else {
+      console.error(`[Pipecat API] Failed to delete room ${roomName}: ${res.status}`);
+    }
+  } catch (err) {
+    console.error(`[Pipecat API] Error deleting room ${roomName}:`, err);
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { callId, config, voice, ttsProvider } = await request.json();
@@ -36,7 +57,7 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({
         properties: {
-          exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour
+          exp: Math.floor(Date.now() / 1000) + 300, // 5 min safety net (rooms deleted immediately on call end)
           enable_chat: false,
           enable_knocking: false,
           enable_screenshare: false,
@@ -125,12 +146,22 @@ async function startBot(roomUrl: string, callId: string, voice: string, ttsProvi
     botProcess.on("error", (error) => {
       console.error(`[Bot ${callId}] Process error:`, error);
       activeBots.delete(callId);
+      const room = activeRooms.get(callId);
+      activeRooms.delete(callId);
+      if (room) {
+        deleteDailyRoom(room.name);
+      }
     });
 
     botProcess.on("exit", (code) => {
       console.log(`[Bot ${callId}] Process exited with code: ${code}`);
       activeBots.delete(callId);
+      const room = activeRooms.get(callId);
       activeRooms.delete(callId);
+      // Delete the Daily room when bot exits (farewell, crash, etc.)
+      if (room) {
+        deleteDailyRoom(room.name);
+      }
     });
 
     // Give the bot a moment to start
@@ -167,15 +198,7 @@ export async function DELETE(request: NextRequest) {
     // Delete the Daily room
     const room = activeRooms.get(callId);
     if (room) {
-      const dailyApiKey = process.env.DAILY_API_KEY;
-      if (dailyApiKey) {
-        await fetch(`https://api.daily.co/v1/rooms/${room.name}`, {
-          method: "DELETE",
-          headers: {
-            "Authorization": `Bearer ${dailyApiKey}`,
-          },
-        }).catch(err => console.error("Failed to delete Daily room:", err));
-      }
+      await deleteDailyRoom(room.name);
       activeRooms.delete(callId);
     }
 

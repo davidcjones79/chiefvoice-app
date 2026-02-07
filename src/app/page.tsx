@@ -576,6 +576,22 @@ function HomeContent() {
     provider.disconnect();
   }, []);
 
+  // Ctrl+D / Cmd+D: Start or end a voice call
+  useEffect(() => {
+    const handleCallShortcut = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "d") {
+        e.preventDefault();
+        if (isInCall) {
+          handleEndCall();
+        } else if (status === "idle" || status === "ended") {
+          handleStartCall();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleCallShortcut);
+    return () => window.removeEventListener("keydown", handleCallShortcut);
+  }, [isInCall, status, handleStartCall, handleEndCall]);
+
   const handlePTTStart = useCallback(() => {
     if (pttKeyHeld.current) return;
     pttKeyHeld.current = true;

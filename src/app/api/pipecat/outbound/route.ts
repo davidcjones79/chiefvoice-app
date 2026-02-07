@@ -7,6 +7,27 @@ const activeOutboundBots = new Map<string, ChildProcess>();
 const activeOutboundRooms = new Map<string, { url: string; name: string; reason: string }>();
 
 /**
+ * Delete a Daily.co room via API. Fire-and-forget safe.
+ */
+async function deleteDailyRoom(roomName: string): Promise<void> {
+  const dailyApiKey = process.env.DAILY_API_KEY;
+  if (!dailyApiKey) return;
+  try {
+    const res = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
+      method: "DELETE",
+      headers: { "Authorization": `Bearer ${dailyApiKey}` },
+    });
+    if (res.ok) {
+      console.log(`[Outbound] Daily room deleted: ${roomName}`);
+    } else {
+      console.error(`[Outbound] Failed to delete room ${roomName}: ${res.status}`);
+    }
+  } catch (err) {
+    console.error(`[Outbound] Error deleting room ${roomName}:`, err);
+  }
+}
+
+/**
  * POST /api/pipecat/outbound - Initiate an AI-to-human outbound call
  *
  * Body:
@@ -48,7 +69,7 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({
         properties: {
-          exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour
+          exp: Math.floor(Date.now() / 1000) + 300, // 5 min safety net (rooms deleted immediately on call end)
           enable_chat: false,
           enable_knocking: false,
           enable_screenshare: false,
@@ -153,12 +174,21 @@ async function startOutboundBot(
     botProcess.on("error", (error) => {
       console.error(`[Outbound Bot ${callId}] Process error:`, error);
       activeOutboundBots.delete(callId);
+      const room = activeOutboundRooms.get(callId);
+      activeOutboundRooms.delete(callId);
+      if (room) {
+        deleteDailyRoom(room.name);
+      }
     });
 
     botProcess.on("exit", (code) => {
       console.log(`[Outbound Bot ${callId}] Process exited with code: ${code}`);
       activeOutboundBots.delete(callId);
+      const room = activeOutboundRooms.get(callId);
       activeOutboundRooms.delete(callId);
+      if (room) {
+        deleteDailyRoom(room.name);
+      }
     });
 
     // Give the bot time to start
@@ -224,6 +254,40 @@ async function sendTelegramNotification(reason: string, urgency: string, joinUrl
     }
   } catch (error) {
     console.error("[Outbound] Failed to send Telegram notification:", error);
+  }
+}
+
+// DELETE - Clean up an outbound call
+export async function DELETE(request: NextRequest) {
+  try {
+    const url = new URL(request.url);
+    const callId = url.searchParams.get("callId");
+
+    if (!callId) {
+      return NextResponse.json({ error: "callId query param required" }, { status: 400 });
+    }
+
+    console.log(`[Outbound] Cleaning up call: ${callId}`);
+
+    const botProcess = activeOutboundBots.get(callId);
+    if (botProcess) {
+      botProcess.kill();
+      activeOutboundBots.delete(callId);
+    }
+
+    const room = activeOutboundRooms.get(callId);
+    if (room) {
+      await deleteDailyRoom(room.name);
+      activeOutboundRooms.delete(callId);
+    }
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("[Outbound] Error cleaning up:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Unknown error" },
+      { status: 500 }
+    );
   }
 }
 

@@ -472,7 +472,7 @@ async def main():
             api_key=OPENAI_API_KEY,
             voice=OPENAI_VOICE,
             sample_rate=24000,
-            speed=1.1,  # Slightly faster for more natural conversation
+            speed=1.15,  # Faster for snappier conversation
         )
         logger.info("✅ OpenAI TTS configured")
     
