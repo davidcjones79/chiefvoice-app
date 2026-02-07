@@ -14,14 +14,22 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-# Use Python 3.13 (required by pipecat dependencies, 3.14 not supported)
-PYTHON="/opt/homebrew/bin/python3.13"
+# Use Python 3.12+ (pipecat requires 3.10-3.13, 3.14 not supported)
+# Detect platform: macOS uses Homebrew, Linux uses system Python
+if [ -x "/opt/homebrew/bin/python3.13" ]; then
+    PYTHON="/opt/homebrew/bin/python3.13"
+elif [ -x "/usr/bin/python3" ]; then
+    PYTHON="/usr/bin/python3"
+else
+    echo "ERROR: No suitable Python found"
+    exit 1
+fi
 
 # Activate virtual environment if it exists, or create it
 if [ -d "venv" ]; then
     source venv/bin/activate
 else
-    echo "Creating virtual environment with Python 3.13..."
+    echo "Creating virtual environment with $PYTHON..."
     $PYTHON -m venv venv
     source venv/bin/activate
     echo "Installing dependencies..."
