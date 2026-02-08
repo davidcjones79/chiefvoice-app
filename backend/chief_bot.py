@@ -14,25 +14,60 @@ import websockets
 from dotenv import load_dotenv
 from loguru import logger
 
-# Immediate acknowledgment phrases (said right away when starting a task)
+# Immediate acknowledgment phrases (said after ~2s if no response yet)
+# These should sound like a real person acknowledging they heard you
 IMMEDIATE_PHRASES = [
-    "Let me check on that.",
-    "Looking into that now.",
+    "Yeah, let me pull that up.",
+    "Sure, give me one sec.",
     "On it.",
-    "Let me see.",
-    "Checking now.",
+    "Yep, looking into that.",
+    "Let me check.",
+    "Good question, let me see.",
+    "Sure thing.",
+    "Yeah, one moment.",
+    "Right, let me look.",
+    "Okay, pulling that up now.",
+    "Let me dig into that.",
+    "Yep, working on it.",
 ]
 
-# Filler phrases for longer waits (said after initial delay)
+# Filler phrases for longer waits (~4s after acknowledgment)
+# These should sound like someone actively working, not a robot waiting
 FILLER_PHRASES = [
-    "Still working on that...",
-    "One moment...",
-    "Just a sec...",
-    "Give me a moment...",
-    "Hang on...",
-    "Almost there...",
-    "Still on it...",
+    "Bear with me, I'm pulling up the details.",
+    "Okay, getting there.",
+    "This one's taking a sec.",
+    "Still on it — just getting the info together.",
+    "Alright, almost got it.",
+    "Just sorting through a couple things.",
+    "Working through it now.",
+    "Hang tight.",
+    "Yeah, it's coming.",
+    "Okay, should have something for you in a moment.",
+    "Just a bit longer.",
+    "Sorry for the wait — want to make sure I get this right.",
 ]
+
+# Extended wait fillers (~8s+ total) — for when things take unusually long
+EXTENDED_FILLER_PHRASES = [
+    "Okay, this is taking longer than usual. Hang on.",
+    "Still here — just want to get you the right answer.",
+    "Appreciate your patience. Almost there.",
+    "Just a little more.",
+    "Yeah, sorry about the wait. Working on it.",
+]
+
+# Context-aware filler keywords — if user message contains these, use specific fillers
+CONTEXT_FILLERS = {
+    "email": ["Checking your inbox now.", "Going through your emails.", "Let me pull up your mail."],
+    "calendar": ["Looking at your schedule.", "Checking your calendar.", "Let me see what's on your calendar."],
+    "call": ["Setting that up now.", "Getting that ready.", "Working on the call setup."],
+    "task": ["Checking your tasks.", "Looking at your to-do list.", "Pulling up your tasks."],
+    "crm": ["Checking Pipedrive now.", "Looking at the CRM.", "Pulling up the deal info."],
+    "pipedrive": ["Checking Pipedrive now.", "Looking at your deals.", "Pulling up Pipedrive."],
+    "notion": ["Checking Notion now.", "Looking through your Notion pages.", "Pulling up Notion."],
+    "github": ["Checking GitHub now.", "Looking at the repo.", "Pulling up GitHub."],
+}
 
 # Farewell patterns that should end the call
 FAREWELL_PATTERNS = {
@@ -200,6 +235,7 @@ class ChiefVoiceGatewayClient:
         self.ws = None
         self.connected = False
         self.request_counter = 0
+        self._lock = asyncio.Lock()
         logger.info(f"Gateway client initialized: {self.gateway_url}")
 
     async def connect(self):
@@ -271,94 +307,81 @@ class ChiefVoiceGatewayClient:
         if not self.connected:
             await self.connect()
 
-        self.request_counter += 1
-        request_id = f"chat-{self.request_counter}"
-        idempotency_key = f"voice-{int(asyncio.get_event_loop().time())}-{self.request_counter}"
+        async with self._lock:
+            self.request_counter += 1
+            request_id = f"chat-{self.request_counter}"
+            idempotency_key = f"voice-{int(asyncio.get_event_loop().time())}-{self.request_counter}"
 
-        # Send chat.send request
-        # Agent is selected via session key prefix: "agent:voice:..."
-        chat_req = {
-            "type": "req",
-            "id": request_id,
-            "method": "chat.send",
-            "params": {
-                "sessionKey": self.session_key,
-                "message": message,
-                "thinking": "off",
-                "idempotencyKey": idempotency_key,
-                "timeoutMs": 120000,
-            },
-        }
+            # Send chat.send request
+            # Agent is selected via session key prefix: "agent:voice:..."
+            chat_req = {
+                "type": "req",
+                "id": request_id,
+                "method": "chat.send",
+                "params": {
+                    "sessionKey": self.session_key,
+                    "message": message,
+                    "thinking": "off",
+                    "idempotencyKey": idempotency_key,
+                    "timeoutMs": 120000,
+                },
+            }
 
-        logger.info(f"📤 Sending to Gateway: {message}")
-        await self.ws.send(json.dumps(chat_req))
+            logger.info(f"Sending to Gateway: {message}")
+            await self.ws.send(json.dumps(chat_req))
 
-        # Wait for response and stream events
-        run_id = None
+            # Wait for response and stream events (inside lock to prevent concurrent recv)
+            run_id = None
 
-        try:
-            while True:
-                msg = await asyncio.wait_for(self.ws.recv(), timeout=120)
-                frame = json.loads(msg)
+            try:
+                while True:
+                    msg = await asyncio.wait_for(self.ws.recv(), timeout=120)
+                    frame = json.loads(msg)
 
-                # Debug: log all frames to understand what's coming back
-                frame_type = frame.get("type")
-                frame_event = frame.get("event")
-                logger.info(f"📨 Gateway frame: type={frame_type} event={frame_event}")
+                    frame_type = frame.get("type")
+                    frame_event = frame.get("event")
 
-                # Handle chat.send response (contains runId)
-                if frame.get("type") == "res" and frame.get("id") == request_id:
-                    if frame.get("ok"):
+                    # Handle chat.send response (contains runId)
+                    if frame_type == "res" and frame.get("id") == request_id:
+                        if frame.get("ok"):
+                            payload = frame.get("payload", {})
+                            run_id = payload.get("runId")
+                        else:
+                            error = frame.get("error", {})
+                            raise Exception(f"Chat request failed: {error.get('message', 'Unknown error')}")
+
+                    # Handle agent events (streaming response)
+                    if frame_type == "event" and frame_event == "agent":
                         payload = frame.get("payload", {})
-                        run_id = payload.get("runId")
-                        logger.debug(f"Chat request accepted, runId: {run_id}")
-                    else:
-                        error = frame.get("error", {})
-                        raise Exception(f"Chat request failed: {error.get('message', 'Unknown error')}")
 
-                # Handle agent events (streaming response)
-                if frame.get("type") == "event" and frame.get("event") == "agent":
-                    payload = frame.get("payload", {})
-                    logger.info(f"📨 Agent event FULL payload: {payload}")
+                        if run_id and payload.get("runId") == run_id:
+                            stream_type = payload.get("stream")
+                            data = payload.get("data", {})
 
-                    # Only process events for our runId
-                    if run_id and payload.get("runId") == run_id:
-                        stream_type = payload.get("stream")
-                        data = payload.get("data", {})
+                            # Stream assistant text - yield each chunk immediately
+                            if stream_type == "assistant" and "delta" in data:
+                                yield data["delta"]
 
-                        # Debug: log stream types to understand agent behavior
-                        logger.info(f"📨 Agent stream: type={stream_type} data={data}")
+                            if stream_type == "lifecycle" and data.get("phase") == "end":
+                                logger.info("Agent lifecycle ended, waiting for chat response...")
 
-                        # Stream assistant text - yield each chunk immediately
-                        if stream_type == "assistant" and "delta" in data:
-                            delta = data["delta"]
-                            yield delta
+                    # Handle chat events (for errors or fallback completion)
+                    if frame_type == "event" and frame_event == "chat":
+                        payload = frame.get("payload", {})
 
-                        # Note: lifecycle end just means agent run ended, but the response
-                        # text comes in the chat event. Don't return here.
-                        if stream_type == "lifecycle" and data.get("phase") == "end":
-                            logger.info("📥 Agent lifecycle ended, waiting for chat response...")
+                        if run_id and payload.get("runId") == run_id:
+                            state = payload.get("state")
 
-                # Handle chat events (for errors or fallback completion)
-                if frame.get("type") == "event" and frame.get("event") == "chat":
-                    payload = frame.get("payload", {})
-                    logger.info(f"📨 Chat event payload: {payload}")
+                            if state == "final":
+                                logger.info("Gateway response complete (final)")
+                                return
+                            elif state in ["aborted", "error"]:
+                                error_msg = payload.get("errorMessage", "Request failed")
+                                raise Exception(f"Chat failed: {error_msg}")
 
-                    if run_id and payload.get("runId") == run_id:
-                        state = payload.get("state")
-
-                        if state == "final":
-                            # Response already streamed via delta chunks above
-                            # Do NOT yield again here - that would duplicate the response
-                            logger.info("📥 Gateway response complete (final)")
-                            return
-                        elif state in ["aborted", "error"]:
-                            error_msg = payload.get("errorMessage", "Request failed")
-                            raise Exception(f"Chat failed: {error_msg}")
-
-        except asyncio.TimeoutError:
-            logger.error("Timeout waiting for gateway response")
-            raise Exception("Gateway timeout")
+            except asyncio.TimeoutError:
+                logger.error("Timeout waiting for gateway response")
+                raise Exception("Gateway timeout")
 
     async def close(self):
         """Close the WebSocket connection"""
@@ -370,10 +393,12 @@ class ChiefVoiceGatewayClient:
 
 
 async def post_transcript(call_id: str, role: str, text: str):
-    """Post transcript to the Chief API"""
+    """Post transcript to the Chief API (no-op if CHIEF_API_URL not configured)"""
+    api_url = os.getenv("CHIEF_API_URL", "")
+    if not api_url:
+        return  # Skip if no API URL configured
     try:
         import aiohttp
-        api_url = os.getenv("CHIEF_API_URL", "http://localhost:3001")
         async with aiohttp.ClientSession() as session:
             await session.post(
                 f"{api_url}/api/pipecat/transcripts/{call_id}",
@@ -382,11 +407,12 @@ async def post_transcript(call_id: str, role: str, text: str):
                     "text": text,
                     "timestamp": int(asyncio.get_event_loop().time() * 1000),
                     "isFinal": True,
-                }
+                },
+                timeout=aiohttp.ClientTimeout(total=2),
             )
-            logger.debug(f"📝 Posted transcript: [{role}] {text[:50]}")
+            logger.debug(f"Posted transcript: [{role}] {text[:50]}")
     except Exception as e:
-        logger.error(f"Failed to post transcript: {e}")
+        logger.debug(f"Transcript post skipped: {e}")
 
 
 async def main():
@@ -510,18 +536,12 @@ async def main():
     llm_messages = [
         {
             "role": "system",
-            "content": f"""You are Rosie, Dave's AI assistant, speaking via Chief voice interface.
-Keep responses concise since they will be spoken aloud, but you have FULL access to tools and integrations.
+            "content": f"""You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
 
-You CAN and SHOULD use tools when asked to:
-- Check email (via gog command)
-- Check calendar (via gog command)
-- Create Notion pages (via mcporter/Notion MCP)
-- Search the web
-- Run shell commands
-- Access all integrations listed below
+You have access to forty-three tools across nine integrations including Gmail, Google Calendar, Pipedrive CRM, Todoist, Notion, GitHub, Confluence, and VAPI for outbound calls.
 
-When Dave asks you to do something like "check my email" or "what's on my calendar", USE THE TOOLS - don't say you can't access them.
+When David asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
 {tools_context}"""
         }
     ]
@@ -532,8 +552,8 @@ When Dave asks you to do something like "check my email" or "what's on my calend
     # Configure VAD - balance between responsiveness and noise filtering
     vad_params = VADParams(
         confidence=0.7,     # Higher confidence to filter noise (default 0.7)
-        start_secs=0.2,     # Require 200ms of speech before triggering (default 0.2)
-        stop_secs=0.9,      # Allow natural pauses - don't interrupt mid-thought (default 0.8)
+        start_secs=0.15,    # Require 150ms of speech before triggering (faster pickup)
+        stop_secs=0.7,      # Allow natural pauses - don't interrupt mid-thought
         min_volume=0.6,     # Higher volume threshold to filter background noise (default 0.6)
     )
     vad_analyzer = SileroVADAnalyzer(sample_rate=16000, params=vad_params)
@@ -615,9 +635,14 @@ When Dave asks you to do something like "check my email" or "what's on my calend
                         logger.info(f"🔇 Ignoring duplicate message: '{user_message[:50]}...'")
                         return
 
-                    # Prevent concurrent processing
+                    # If still processing, interrupt TTS but don't start new gateway request
+                    # (WebSocket lock prevents concurrent streams)
                     if processing_in_progress:
-                        logger.info(f"🔇 Ignoring message - already processing: '{user_message[:50]}...'")
+                        logger.info(f"🎤 Barge-in while processing: '{user_message[:50]}...'")
+                        try:
+                            await task.queue_frame(StartInterruptionFrame())
+                        except Exception:
+                            pass
                         return
 
                     # During bot speech, only process if it's clearly NOT echo
@@ -632,10 +657,10 @@ When Dave asks you to do something like "check my email" or "what's on my calend
                             # Cancel current bot speech by setting flag
                             bot_is_speaking = False
 
-                    # Short cooldown: Ignore messages within 1 second after bot finishes
+                    # Short cooldown: Ignore messages within 0.3 seconds after bot finishes
                     # (catches immediate echo, but allows quick follow-up from user)
                     time_since_bot = time.time() - last_bot_speech_end
-                    if time_since_bot < 1.0:
+                    if time_since_bot < 0.3:
                         logger.info(f"🔇 Ignoring message during cooldown: '{user_message[:50]}' ({time_since_bot:.1f}s after bot)")
                         return  # Skip - likely echo
 
@@ -666,47 +691,60 @@ When Dave asks you to do something like "check my email" or "what's on my calend
                     ack_task = None
                     filler_task = None
 
+                    def _pick_phrase(phrase_list, recent_list, max_recent=5):
+                        """Pick a phrase not recently used."""
+                        available = [p for p in phrase_list if p not in recent_list]
+                        if not available:
+                            recent_list.clear()
+                            available = phrase_list
+                        phrase = random.choice(available)
+                        recent_list.append(phrase)
+                        if len(recent_list) > max_recent:
+                            recent_list.pop(0)
+                        return phrase
+
+                    def _get_context_filler(msg):
+                        """Try to pick a context-aware filler based on the user's message."""
+                        msg_lower = msg.lower()
+                        for keyword, fillers in CONTEXT_FILLERS.items():
+                            if keyword in msg_lower:
+                                return random.choice(fillers)
+                        return None
+
                     async def send_acknowledgment_after_delay():
-                        """Send acknowledgment if response takes more than 3 seconds"""
-                        await asyncio.sleep(3)  # Wait 3 seconds before any filler
+                        """Send acknowledgment if response takes more than 2 seconds"""
+                        await asyncio.sleep(2)
                         if not first_chunk_received.is_set() and not acknowledgment_sent.is_set():
                             acknowledgment_sent.set()
-                            available_immediate = [p for p in IMMEDIATE_PHRASES if p not in recent_immediate]
-                            if not available_immediate:
-                                recent_immediate.clear()
-                                available_immediate = IMMEDIATE_PHRASES
-                            immediate = random.choice(available_immediate)
-                            recent_immediate.append(immediate)
-                            if len(recent_immediate) > 3:
-                                recent_immediate.pop(0)
-                            logger.info(f"💬 Acknowledgment after 3s: {immediate}")
-                            await task.queue_frame(TTSSpeakFrame(text=immediate))
+                            # Try context-aware filler first
+                            phrase = _get_context_filler(user_message)
+                            if not phrase:
+                                phrase = _pick_phrase(IMMEDIATE_PHRASES, recent_immediate)
+                            logger.info(f"Acknowledgment: {phrase}")
+                            await task.queue_frame(TTSSpeakFrame(text=phrase))
 
                     # Start acknowledgment timer for non-simple queries
                     if not simple_chat:
                         ack_task = asyncio.create_task(send_acknowledgment_after_delay())
-                    else:
-                        logger.info(f"💬 Simple chat detected, skipping acknowledgment")
 
-                    # Streaming TTS with filler phrase support for longer waits
+                    # Filler phrase escalation for longer waits
 
                     async def send_filler_after_delay():
-                        """Send a filler phrase if response takes too long"""
+                        """Send filler phrases at escalating intervals if response takes too long"""
                         nonlocal recent_fillers
-                        await asyncio.sleep(4)  # Additional filler after 4 more seconds
+                        # First filler at ~4s
+                        await asyncio.sleep(4)
                         if not first_chunk_received.is_set():
-                            # Pick a filler that wasn't recently used
-                            available = [f for f in FILLER_PHRASES if f not in recent_fillers]
-                            if not available:
-                                recent_fillers = []
-                                available = FILLER_PHRASES
-                            filler = random.choice(available)
-                            recent_fillers.append(filler)
-                            if len(recent_fillers) > 4:
-                                recent_fillers.pop(0)
-
-                            logger.info(f"⏳ Sending filler: {filler}")
+                            filler = _pick_phrase(FILLER_PHRASES, recent_fillers)
+                            logger.info(f"Filler: {filler}")
                             await task.queue_frame(TTSSpeakFrame(text=filler))
+
+                        # Extended filler at ~8s
+                        await asyncio.sleep(4)
+                        if not first_chunk_received.is_set():
+                            extended = random.choice(EXTENDED_FILLER_PHRASES)
+                            logger.info(f"Extended filler: {extended}")
+                            await task.queue_frame(TTSSpeakFrame(text=extended))
 
                     try:
                         # Start filler task for longer waits (only for non-simple chat)
@@ -736,16 +774,17 @@ When Dave asks you to do something like "check my email" or "what's on my calend
                                 logger.info(f"⏱️ [PERF] First AI chunk at {first_chunk_time:.3f}")
                                 logger.info(f"⏱️ [PERF] 🎯 AI Response Time: {ai_latency:.2f}s | End-to-End: {e2e_latency:.2f}s")
 
-                            # Send to TTS when we have a complete sentence or enough text
-                            # Look for sentence endings: . ! ? or newlines
-                            # Also send if buffer gets long (for run-on sentences)
+                            # Send to TTS aggressively for low-latency first audio
+                            # First chunk: send at any natural break after ~30 chars
+                            # Later chunks: send at sentence boundaries or ~100 chars
                             should_send = False
                             send_text = ""
 
+                            min_chunk = 30 if chunks_sent == 0 else 60
+
                             # Check for sentence-ending punctuation
                             for i, char in enumerate(text_buffer):
-                                if char in '.!?\n':
-                                    # Include the punctuation and any following space
+                                if char in '.!?\n' and i >= min_chunk - 10:
                                     end_idx = i + 1
                                     while end_idx < len(text_buffer) and text_buffer[end_idx] in ' \n':
                                         end_idx += 1
@@ -754,11 +793,22 @@ When Dave asks you to do something like "check my email" or "what's on my calend
                                     should_send = True
                                     break
 
-                            # Also send if buffer is getting long (150+ chars without punctuation)
-                            if not should_send and len(text_buffer) > 150:
-                                # Find a good break point (space)
-                                break_point = text_buffer.rfind(' ', 0, 150)
-                                if break_point > 50:
+                            # For first chunk, also break at commas/dashes/colons for faster audio
+                            if not should_send and chunks_sent == 0 and len(text_buffer) > min_chunk:
+                                for i, char in enumerate(text_buffer):
+                                    if char in ',;:—–-' and i >= min_chunk:
+                                        end_idx = i + 1
+                                        while end_idx < len(text_buffer) and text_buffer[end_idx] == ' ':
+                                            end_idx += 1
+                                        send_text = text_buffer[:end_idx]
+                                        text_buffer = text_buffer[end_idx:]
+                                        should_send = True
+                                        break
+
+                            # Also send if buffer is getting long (100+ chars without punctuation)
+                            if not should_send and len(text_buffer) > 100:
+                                break_point = text_buffer.rfind(' ', 0, 100)
+                                if break_point > 30:
                                     send_text = text_buffer[:break_point + 1]
                                     text_buffer = text_buffer[break_point + 1:]
                                     should_send = True
@@ -857,8 +907,17 @@ When Dave asks you to do something like "check my email" or "what's on my calend
     async def on_first_participant_joined(transport_obj, participant):
         logger.info(f"👋 Participant joined: {participant.get('id')}")
 
+        # Pre-connect gateway while waiting for transport
+        if gateway_client and not gateway_client.connected:
+            try:
+                logger.info("⚡ Pre-connecting to gateway...")
+                await gateway_client.connect()
+                logger.info("✅ Gateway pre-connected")
+            except Exception as e:
+                logger.error(f"Gateway pre-connect failed: {e}")
+
         # Wait for transport to be ready
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.0)
 
         # Different greeting for outbound (AI-initiated) calls
         if OUTBOUND_MODE:
@@ -882,7 +941,7 @@ When Dave asks you to do something like "check my email" or "what's on my calend
                         logger.error(f"Failed to send outbound context: {e}")
             logger.info(f"📞 Outbound call - Reason: {OUTBOUND_REASON}, Urgency: {OUTBOUND_URGENCY}")
         else:
-            greeting = "Hey Dave! I'm here. What can I help you with?"
+            greeting = "Hey David. What can I help you with?"
 
         logger.info(f"💬 Sending greeting: {greeting}")
 
