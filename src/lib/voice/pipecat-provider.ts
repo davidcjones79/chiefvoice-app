@@ -18,6 +18,9 @@ export class PipecatProvider implements VoiceProvider {
   private accumulatedBotText = "";
   private botSpeakingTimestamp = 0;
   private isBotSpeaking = false;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 3;
+  private intentionalDisconnect = false;
 
   async connect(config: VoiceConfig, callbacks: VoiceProviderCallbacks): Promise<void> {
     console.log("[PipecatProvider] connect() called");
@@ -29,6 +32,8 @@ export class PipecatProvider implements VoiceProvider {
 
     this.isConnecting = true;
     this.callbacks = callbacks;
+    this.intentionalDisconnect = false;
+    this.reconnectAttempts = 0;
 
     try {
       callbacks.onStatusChange("connecting");
@@ -83,11 +88,37 @@ export class PipecatProvider implements VoiceProvider {
             callbacks.onStatusChange("connected");
           },
           onDisconnected: () => {
-            console.log("[PipecatProvider] Disconnected");
-            callbacks.onStatusChange("ended");
+            console.log("[PipecatProvider] Disconnected, intentional:", this.intentionalDisconnect);
+            if (!this.intentionalDisconnect && this.roomUrl && this.reconnectAttempts < this.maxReconnectAttempts) {
+              this.reconnectAttempts++;
+              const delay = 1000 * this.reconnectAttempts;
+              console.log(`[PipecatProvider] Attempting reconnect ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
+              callbacks.onStatusChange("connecting");
+              setTimeout(async () => {
+                try {
+                  if (this.client && this.roomUrl) {
+                    await this.client.connect({
+                      url: this.roomUrl,
+                      subscribeToTracksAutomatically: true,
+                    });
+                    this.reconnectAttempts = 0;
+                    console.log("[PipecatProvider] Reconnected successfully");
+                  }
+                } catch (e) {
+                  console.error("[PipecatProvider] Reconnect failed:", e);
+                  if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+                    console.error("[PipecatProvider] Max reconnect attempts reached");
+                    callbacks.onStatusChange("ended");
+                  }
+                }
+              }, delay);
+            } else {
+              callbacks.onStatusChange("ended");
+            }
           },
           onBotReady: () => {
             console.log("[PipecatProvider] Bot ready");
+            this.reconnectAttempts = 0; // Reset on successful bot ready
             callbacks.onStatusChange("listening");
           },
           onBotStartedSpeaking: () => {
@@ -96,18 +127,8 @@ export class PipecatProvider implements VoiceProvider {
             this.accumulatedBotText = "";
             this.botSpeakingTimestamp = Date.now();
             callbacks.onStatusChange("speaking");
-            
-            // In hands-free mode, keep mic on for barge-in (echo cancellation handles feedback)
-            // In PTT mode, mute mic while bot speaks
-            const isHandsFree = typeof window !== 'undefined'
-              ? localStorage.getItem("chief-hands-free-mode") === "true"
-              : false;
-            if (this.client && !isHandsFree) {
-              this.client.enableMic(false);
-              console.log("[PipecatProvider] Muted mic during bot speech (PTT mode)");
-            } else {
-              console.log("[PipecatProvider] Keeping mic on for barge-in (hands-free mode)");
-            }
+            // Don't toggle mic here - PTT is user-controlled, and hands-free needs
+            // barge-in. Redundant enableMic toggles kill iOS Safari audio tracks.
           },
           onBotStoppedSpeaking: () => {
             console.log("[PipecatProvider] Bot stopped speaking");
@@ -123,17 +144,6 @@ export class PipecatProvider implements VoiceProvider {
               this.accumulatedBotText = "";
             }
             callbacks.onStatusChange("listening");
-
-            // Unmute mic after bot finishes (only in hands-free mode AND if user hasn't manually muted)
-            const isHandsFree = typeof window !== 'undefined'
-              ? localStorage.getItem("chief-hands-free-mode") === "true"
-              : false;
-            if (this.client && isHandsFree && !this.muted) {
-              this.client.enableMic(true);
-              console.log("[PipecatProvider] Unmuted mic after bot speech");
-            } else if (this.muted) {
-              console.log("[PipecatProvider] User has manually muted, keeping mic muted");
-            }
           },
           onUserStartedSpeaking: () => {
             console.log("[PipecatProvider] User started speaking");
@@ -257,6 +267,7 @@ export class PipecatProvider implements VoiceProvider {
 
   disconnect(): void {
     console.log("[PipecatProvider] disconnect() called");
+    this.intentionalDisconnect = true;
 
     // Clean up audio element
     if (this.audioElementId) {
@@ -287,6 +298,8 @@ export class PipecatProvider implements VoiceProvider {
     this.isConnecting = false;
     this.accumulatedBotText = "";
     this.botSpeakingTimestamp = 0;
+    this.reconnectAttempts = 0;
+    this.intentionalDisconnect = false;
   }
 
   isMuted(): boolean {
@@ -333,6 +346,8 @@ export class PipecatProvider implements VoiceProvider {
     this.callbacks = callbacks;
     this.roomUrl = roomUrl;
     this.callId = callId;
+    this.intentionalDisconnect = false;
+    this.reconnectAttempts = 0;
 
     try {
       callbacks.onStatusChange("connecting");
@@ -350,11 +365,37 @@ export class PipecatProvider implements VoiceProvider {
             callbacks.onStatusChange("connected");
           },
           onDisconnected: () => {
-            console.log("[PipecatProvider] Disconnected from outbound room");
-            callbacks.onStatusChange("ended");
+            console.log("[PipecatProvider] Disconnected from outbound room, intentional:", this.intentionalDisconnect);
+            if (!this.intentionalDisconnect && this.roomUrl && this.reconnectAttempts < this.maxReconnectAttempts) {
+              this.reconnectAttempts++;
+              const delay = 1000 * this.reconnectAttempts;
+              console.log(`[PipecatProvider] Attempting reconnect ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
+              callbacks.onStatusChange("connecting");
+              setTimeout(async () => {
+                try {
+                  if (this.client && this.roomUrl) {
+                    await this.client.connect({
+                      url: this.roomUrl,
+                      subscribeToTracksAutomatically: true,
+                    });
+                    this.reconnectAttempts = 0;
+                    console.log("[PipecatProvider] Reconnected successfully");
+                  }
+                } catch (e) {
+                  console.error("[PipecatProvider] Reconnect failed:", e);
+                  if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+                    console.error("[PipecatProvider] Max reconnect attempts reached");
+                    callbacks.onStatusChange("ended");
+                  }
+                }
+              }, delay);
+            } else {
+              callbacks.onStatusChange("ended");
+            }
           },
           onBotReady: () => {
             console.log("[PipecatProvider] Bot ready in outbound room");
+            this.reconnectAttempts = 0;
             callbacks.onStatusChange("listening");
           },
           onBotStartedSpeaking: () => {
@@ -363,18 +404,6 @@ export class PipecatProvider implements VoiceProvider {
             this.accumulatedBotText = "";
             this.botSpeakingTimestamp = Date.now();
             callbacks.onStatusChange("speaking");
-
-            // In hands-free mode, keep mic on for barge-in (echo cancellation handles feedback)
-            // In PTT mode, mute mic while bot speaks
-            const isHandsFree = typeof window !== 'undefined'
-              ? localStorage.getItem("chief-hands-free-mode") === "true"
-              : false;
-            if (this.client && !isHandsFree) {
-              this.client.enableMic(false);
-              console.log("[PipecatProvider] Muted mic during bot speech (PTT mode)");
-            } else {
-              console.log("[PipecatProvider] Keeping mic on for barge-in (hands-free mode)");
-            }
           },
           onBotStoppedSpeaking: () => {
             console.log("[PipecatProvider] Bot stopped speaking");
@@ -389,17 +418,6 @@ export class PipecatProvider implements VoiceProvider {
               this.accumulatedBotText = "";
             }
             callbacks.onStatusChange("listening");
-
-            // Unmute mic after bot finishes (only in hands-free mode AND if user hasn't manually muted)
-            const isHandsFree = typeof window !== 'undefined'
-              ? localStorage.getItem("chief-hands-free-mode") === "true"
-              : false;
-            if (this.client && isHandsFree && !this.muted) {
-              this.client.enableMic(true);
-              console.log("[PipecatProvider] Unmuted mic after bot speech");
-            } else if (this.muted) {
-              console.log("[PipecatProvider] User has manually muted, keeping mic muted");
-            }
           },
           onUserStartedSpeaking: () => {
             console.log("[PipecatProvider] User started speaking");

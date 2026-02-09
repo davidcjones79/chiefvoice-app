@@ -91,15 +91,26 @@ export function WakeWordListener({ enabled, onWakeWord, isInCall }: WakeWordList
 
     recognition.onend = () => {
       console.log("[WakeWord] Ended, restarting...");
-      // Auto-restart if still enabled
+      // Auto-restart if still enabled - create a FRESH instance since the old one
+      // can become unrecoverable after multiple onend cycles
       if (enabled && !isInCall && permissionGranted && recognitionRef.current) {
         setTimeout(() => {
           try {
-            recognition.start();
+            const fresh = new SpeechRecognition();
+            fresh.continuous = true;
+            fresh.interimResults = true;
+            fresh.lang = "en-US";
+            fresh.onstart = recognition.onstart;
+            fresh.onresult = recognition.onresult;
+            fresh.onerror = recognition.onerror;
+            fresh.onend = recognition.onend;
+            recognitionRef.current = fresh;
+            fresh.start();
+            console.log("[WakeWord] Restarted with fresh instance");
           } catch (e) {
             console.error("[WakeWord] Restart failed:", e);
           }
-        }, 100);
+        }, 300);
       }
     };
 

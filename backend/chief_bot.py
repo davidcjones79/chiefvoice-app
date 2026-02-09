@@ -659,8 +659,9 @@ When David asks you to do something — check email, look at calendar, update CR
 
                     # Short cooldown: Ignore messages within 0.3 seconds after bot finishes
                     # (catches immediate echo, but allows quick follow-up from user)
+                    # Only apply when time_since_bot is positive (bot has actually finished)
                     time_since_bot = time.time() - last_bot_speech_end
-                    if time_since_bot < 0.3:
+                    if 0 <= time_since_bot < 0.3:
                         logger.info(f"🔇 Ignoring message during cooldown: '{user_message[:50]}' ({time_since_bot:.1f}s after bot)")
                         return  # Skip - likely echo
 
@@ -978,6 +979,7 @@ When David asks you to do something — check email, look at calendar, update CR
     @transport.event_handler("on_app_message")
     async def on_app_message(transport_obj, message, sender):
         """Handle app messages from the client, including interrupt signals"""
+        nonlocal last_bot_speech_end, bot_is_speaking
         logger.info(f"📨 App message received: {message} from {sender}")
 
         # Check for interrupt signal (user-started-speaking from client)
@@ -996,6 +998,9 @@ When David asks you to do something — check email, look at calendar, update CR
 
         if msg_type == "user-started-speaking":
             logger.info("🛑 Interrupt signal received - stopping speech")
+            # Reset cooldown to now so user messages aren't blocked
+            last_bot_speech_end = time.time()
+            bot_is_speaking = False
             try:
                 await task.queue_frame(StartInterruptionFrame())
             except Exception as e:
