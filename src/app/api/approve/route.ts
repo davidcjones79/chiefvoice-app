@@ -3,14 +3,13 @@ import { getPlan, getPlanByShortId, updatePlan, listPendingPlans } from "@/lib/a
 import { approveAllActions, rejectAllActions, executePlan } from "@/lib/actions/executor";
 import { sendExecutionReport } from "@/lib/actions/telegram";
 
-// Simple auth - should match ChiefVoice gateway token for now
 const API_TOKEN = process.env.CHIEFVOICE_GATEWAY_TOKEN;
 
 export async function POST(request: NextRequest) {
   try {
-    // Check auth
+    // Auth is mandatory — reject if token is missing or doesn't match
     const authHeader = request.headers.get('authorization');
-    if (API_TOKEN && authHeader !== `Bearer ${API_TOKEN}`) {
+    if (!API_TOKEN || authHeader !== `Bearer ${API_TOKEN}`) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 

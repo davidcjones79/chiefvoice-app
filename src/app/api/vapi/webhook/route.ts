@@ -3,6 +3,8 @@ import { extractActionsFromTranscript, savePlan, sendApprovalRequest } from "@/l
 
 // This webhook receives events from Vapi and handles the voice-to-action pipeline
 
+const VAPI_WEBHOOK_SECRET = process.env.VAPI_WEBHOOK_SECRET || "";
+
 interface VapiWebhookPayload {
   type: string;
   call?: {
@@ -24,6 +26,17 @@ interface VapiWebhookPayload {
 
 export async function POST(request: NextRequest) {
   try {
+    // Verify webhook is from VAPI
+    if (VAPI_WEBHOOK_SECRET) {
+      const vapiSecret = request.headers.get("x-vapi-secret");
+      if (vapiSecret !== VAPI_WEBHOOK_SECRET) {
+        console.warn("[Webhook] Rejected: invalid or missing x-vapi-secret");
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+    } else {
+      console.warn("[Webhook] VAPI_WEBHOOK_SECRET not configured — webhook is unprotected");
+    }
+
     const payload: VapiWebhookPayload = await request.json();
     
     console.log("[Webhook] Vapi event received:", payload.type);
