@@ -184,15 +184,34 @@ from pipecat.processors.aggregators.llm_response import (
     LLMAssistantResponseAggregator,
     LLMUserResponseAggregator,
 )
-from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.openai.tts import OpenAITTSService
-from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.piper.tts import PiperTTSService
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from deepgram import LiveOptions
+
+# Cloud-only imports — optional, only needed when not in PRIVATE_MODE
+try:
+    from pipecat.services.deepgram.stt import DeepgramSTTService
+    from deepgram import LiveOptions
+except Exception:
+    DeepgramSTTService = None  # type: ignore
+    LiveOptions = None  # type: ignore
+
+try:
+    from pipecat.services.openai.tts import OpenAITTSService
+except Exception:
+    OpenAITTSService = None  # type: ignore
+
+try:
+    from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+except Exception:
+    ElevenLabsTTSService = None  # type: ignore
+
+try:
+    from pipecat.transports.daily.transport import DailyParams, DailyTransport
+except Exception:
+    DailyParams = None  # type: ignore
+    DailyTransport = None  # type: ignore
 
 # Load environment variables from parent directory's .env.local
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env.local')
@@ -204,7 +223,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_VOICE = os.getenv("OPENAI_VOICE", "shimmer")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "vu6gUGJTkGGUmQLLHG2D")
-PIPER_VOICE = os.getenv("PIPER_VOICE", "en_US-lessac-medium")
+PIPER_VOICE = os.getenv("PIPER_VOICE", "en_US-lessac-high")
+PIPER_DOWNLOAD_DIR = os.getenv("PIPER_DOWNLOAD_DIR", "/home/user/piper-voices")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "openai")
 CHIEFVOICE_GATEWAY_URL = os.getenv("CHIEFVOICE_GATEWAY_URL", "ws://localhost:18789")
 CHIEFVOICE_GATEWAY_TOKEN = os.getenv("CHIEFVOICE_GATEWAY_TOKEN")
@@ -219,6 +239,13 @@ for i, arg in enumerate(sys.argv):
     if arg == "--port" and i + 1 < len(sys.argv):
         WEBRTC_PORT = int(sys.argv[i + 1])
 
+# Private mode configuration (local STT/LLM/TTS, no cloud API keys)
+PRIVATE_MODE = os.getenv("PRIVATE_MODE", "false").lower() == "true"
+LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
+
 # Outbound call configuration
 OUTBOUND_MODE = os.getenv("OUTBOUND_MODE", "false").lower() == "true"
 OUTBOUND_REASON = os.getenv("OUTBOUND_REASON", "")
@@ -227,7 +254,7 @@ OUTBOUND_CONTEXT = os.getenv("OUTBOUND_CONTEXT", "")
 
 # Configure logging
 logger.remove(0)
-logger.add(sys.stderr, level="INFO")  # Reduce noise for testing
+logger.add(sys.stderr, level="INFO")
 
 
 class ChiefVoiceGatewayClient:
@@ -1038,6 +1065,8 @@ async def main_webrtc():
     from pipecat.transports.smallwebrtc.request_handler import (
         SmallWebRTCRequestHandler,
         SmallWebRTCRequest,
+        SmallWebRTCPatchRequest,
+        IceCandidate,
     )
     from pipecat.transports.base_transport import TransportParams
 
@@ -1045,50 +1074,75 @@ async def main_webrtc():
 
     call_id = os.getenv("CALL_ID", f"webrtc-{int(time.time())}")
 
-    # Validate configuration
-    if not DEEPGRAM_API_KEY:
-        logger.error("DEEPGRAM_API_KEY not set")
-        return
-    if not OPENAI_API_KEY:
-        logger.error("OPENAI_API_KEY not set")
-        return
+    # Preload heavy models once — service instances created per-connection
+    # (Pipecat processors have internal pipeline state and can't be reused)
+    if PRIVATE_MODE:
+        logger.info("🔒 Private mode: using local STT/LLM/TTS (zero cloud API calls)")
+        from pipecat.services.whisper.stt import WhisperSTTService
+        from faster_whisper import WhisperModel as FasterWhisperModel
+        from pathlib import Path
 
-    # Initialize services (same as Daily mode)
-    deepgram_options = LiveOptions(
-        model="nova-2",
-        language="en-US",
-        smart_format=True,
-        interim_results=True,
-        punctuate=True,
-        encoding="linear16",
-        sample_rate=16000,
-        channels=1,
-        filler_words=False,
-        endpointing=300,
-    )
-    stt = DeepgramSTTService(api_key=DEEPGRAM_API_KEY, live_options=deepgram_options)
-
-    if TTS_PROVIDER == "elevenlabs":
-        if not ELEVENLABS_API_KEY:
-            logger.error("ELEVENLABS_API_KEY not set")
-            return
-        tts = ElevenLabsTTSService(
-            api_key=ELEVENLABS_API_KEY,
-            voice_id=ELEVENLABS_VOICE_ID,
-            sample_rate=24000,
+        _whisper_model = FasterWhisperModel(
+            WHISPER_MODEL,
+            device=WHISPER_DEVICE,
+            compute_type="float16" if WHISPER_DEVICE == "cuda" else "int8",
         )
-    elif TTS_PROVIDER == "piper":
-        tts = PiperTTSService(voice_id=PIPER_VOICE, sample_rate=22050)
-        tts._sample_rate = 22050
+        logger.info(f"  STT: faster-whisper ({WHISPER_MODEL} on {WHISPER_DEVICE})")
+        logger.info(f"  LLM: vLLM ({LOCAL_LLM_MODEL} at {LOCAL_LLM_URL})")
+        logger.info(f"  TTS: Piper ({PIPER_VOICE} from {PIPER_DOWNLOAD_DIR})")
     else:
-        tts = OpenAITTSService(
-            api_key=OPENAI_API_KEY,
-            voice=OPENAI_VOICE,
-            sample_rate=24000,
-            speed=1.15,
-        )
+        _whisper_model = None
+        if not DEEPGRAM_API_KEY:
+            logger.error("DEEPGRAM_API_KEY not set (use PRIVATE_MODE=true for local services)")
+            return
+        if not OPENAI_API_KEY:
+            logger.error("OPENAI_API_KEY not set (use PRIVATE_MODE=true for local services)")
+            return
 
-    llm = OpenAILLMService(api_key=OPENAI_API_KEY, model="gpt-4o")
+    def create_services():
+        """Create fresh service instances for each connection."""
+        if PRIVATE_MODE:
+            # Skip _load() in constructor — it would load a duplicate 3GB model
+            # into CUDA and OOM. We inject the preloaded model instead.
+            _original_load = WhisperSTTService._load
+            try:
+                WhisperSTTService._load = lambda self: None
+                stt = WhisperSTTService(
+                    model=WHISPER_MODEL,
+                    device=WHISPER_DEVICE,
+                    compute_type="float16" if WHISPER_DEVICE == "cuda" else "int8",
+                    no_speech_prob=0.4,
+                )
+            finally:
+                WhisperSTTService._load = _original_load
+            stt._model = _whisper_model
+            llm = OpenAILLMService(
+                api_key="not-needed",
+                model=LOCAL_LLM_MODEL,
+                base_url=LOCAL_LLM_URL,
+            )
+            tts = PiperTTSService(
+                voice_id=PIPER_VOICE,
+                download_dir=Path(PIPER_DOWNLOAD_DIR),
+                use_cuda=WHISPER_DEVICE == "cuda",
+            )
+            tts._sample_rate = 22050
+        else:
+            deepgram_options = LiveOptions(
+                model="nova-2", language="en-US", smart_format=True,
+                interim_results=True, punctuate=True, encoding="linear16",
+                sample_rate=16000, channels=1, filler_words=False, endpointing=300,
+            )
+            stt = DeepgramSTTService(api_key=DEEPGRAM_API_KEY, live_options=deepgram_options)
+            if TTS_PROVIDER == "elevenlabs":
+                tts = ElevenLabsTTSService(api_key=ELEVENLABS_API_KEY, voice_id=ELEVENLABS_VOICE_ID, sample_rate=24000)
+            elif TTS_PROVIDER == "piper":
+                tts = PiperTTSService(voice_id=PIPER_VOICE, sample_rate=22050)
+                tts._sample_rate = 22050
+            else:
+                tts = OpenAITTSService(api_key=OPENAI_API_KEY, voice=OPENAI_VOICE, sample_rate=24000, speed=1.15)
+            llm = OpenAILLMService(api_key=OPENAI_API_KEY, model="gpt-4o")
+        return stt, llm, tts
 
     # Optional gateway client
     gateway_client = None
@@ -1100,61 +1154,76 @@ async def main_webrtc():
         )
 
     tools_context = ""
-    tools_path = os.path.expanduser("~/clawd/TOOLS.md")
-    if os.path.exists(tools_path):
-        try:
-            with open(tools_path, "r") as f:
-                tools_context = f"\n\n## Available Tools & Integrations\n\n{f.read()}"
-        except Exception:
-            pass
+    if USE_GATEWAY and CHIEFVOICE_GATEWAY_TOKEN:
+        tools_path = os.path.expanduser("~/clawd/TOOLS.md")
+        if os.path.exists(tools_path):
+            try:
+                with open(tools_path, "r") as f:
+                    tools_context = f"\n\n## Available Tools & Integrations\n\n{f.read()}"
+            except Exception:
+                pass
 
-    llm_messages = [
-        {
-            "role": "system",
-            "content": f"""You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
-Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
-
-You have access to forty-three tools across nine integrations including Gmail, Google Calendar, Pipedrive CRM, Todoist, Notion, GitHub, Confluence, and VAPI for outbound calls.
-
-When David asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
-{tools_context}"""
-        }
-    ]
-
-    vad_params = VADParams(
-        confidence=0.7,
-        start_secs=0.15,
-        stop_secs=0.7,
-        min_volume=0.6,
+    handler = SmallWebRTCRequestHandler(
+        ice_servers=["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
     )
-    vad_analyzer = SileroVADAnalyzer(sample_rate=16000, params=vad_params)
-
-    handler = SmallWebRTCRequestHandler()
 
     async def handle_offer(request):
         """SmallWebRTC SDP offer handler"""
         body = await request.json()
         sdp = body.get("sdp")
         sdp_type = body.get("type", "offer")
+        pc_id = body.get("pc_id")  # Reuse existing connection on renegotiation
 
         if not sdp:
             return web.json_response({"error": "Missing 'sdp'"}, status=400)
 
         async def on_connection(conn):
+            # Create fresh services per connection — Pipecat processors have
+            # internal pipeline state and CANNOT be reused across pipelines.
+            stt, llm, tts = create_services()
+
+            # Fresh VAD analyzer per connection
+            conn_vad_params = VADParams(
+                confidence=0.7,
+                start_secs=0.15,
+                stop_secs=0.7,
+                min_volume=0.6,
+            )
+            conn_vad = SileroVADAnalyzer(sample_rate=16000, params=conn_vad_params)
+
+            # Use 16kHz in/out — pipecat resamples internally.
+            # Piper TTS outputs 22050Hz but pipecat handles the conversion.
             transport = SmallWebRTCTransport(
                 webrtc_connection=conn,
                 params=TransportParams(
                     audio_in_enabled=True,
                     audio_in_sample_rate=16000,
                     audio_out_enabled=True,
-                    audio_out_sample_rate=24000,
+                    audio_out_sample_rate=16000,
                     vad_enabled=True,
-                    vad_analyzer=vad_analyzer,
+                    vad_analyzer=conn_vad,
                 ),
             )
 
-            user_aggregator = LLMUserResponseAggregator(llm_messages)
-            assistant_aggregator = LLMAssistantResponseAggregator(llm_messages)
+            # Fresh message history per connection
+            if gateway_client:
+                system_prompt = f"""You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
+
+You have access to forty-three tools across nine integrations including Gmail, Google Calendar, Pipedrive CRM, Todoist, Notion, GitHub, Confluence, and VAPI for outbound calls.
+
+When David asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
+{tools_context}"""
+            else:
+                system_prompt = """You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
+
+You are running in local-only mode without any tool integrations. You can have conversations, answer questions, brainstorm, and help think through problems — but you CANNOT access email, calendar, CRM, or any external services. If asked to do something that requires tools, honestly say you're not connected to those services right now."""
+
+            conn_messages = [{"role": "system", "content": system_prompt}]
+
+            user_aggregator = LLMUserResponseAggregator(conn_messages)
+            assistant_aggregator = LLMAssistantResponseAggregator(conn_messages)
 
             pipeline = Pipeline([
                 transport.input(),
@@ -1337,16 +1406,50 @@ When David asks you to do something — check email, look at calendar, update CR
                 user_aggregator.push_frame = intercept_and_forward
 
             runner = PipelineRunner()
-            try:
-                await runner.run(task)
-            except Exception as e:
-                logger.error(f"Pipeline error: {e}", exc_info=True)
-            finally:
-                await runner.cleanup()
 
-        webrtc_request = SmallWebRTCRequest(sdp=sdp, type=sdp_type)
+            async def run_pipeline():
+                try:
+                    await runner.run(task)
+                except Exception as e:
+                    logger.error(f"Pipeline error: {e}", exc_info=True)
+                finally:
+                    await runner.cleanup()
+
+            # Fire-and-forget: handle_web_request awaits this callback, so we must
+            # return quickly.  The SDP answer is generated during initialize(), not here.
+            asyncio.create_task(run_pipeline())
+
+        webrtc_request = SmallWebRTCRequest(sdp=sdp, type=sdp_type, pc_id=pc_id)
         answer = await handler.handle_web_request(webrtc_request, on_connection)
         return web.json_response(answer)
+
+    async def handle_patch(request):
+        """SmallWebRTC ICE candidate trickle handler"""
+        body = await request.json()
+        pc_id = body.get("pc_id")
+        candidates_raw = body.get("candidates", [])
+
+        if not pc_id:
+            return web.json_response({"error": "Missing 'pc_id'"}, status=400)
+
+        candidates = [
+            IceCandidate(
+                candidate=c.get("candidate", ""),
+                sdp_mid=c.get("sdpMid", c.get("sdp_mid", "")),
+                sdp_mline_index=c.get("sdpMLineIndex", c.get("sdp_mline_index", 0)),
+            )
+            for c in candidates_raw
+        ]
+
+        patch_request = SmallWebRTCPatchRequest(pc_id=pc_id, candidates=candidates)
+        try:
+            await handler.handle_patch_request(patch_request)
+        except Exception as e:
+            # handle_patch_request raises HTTPException (FastAPI) for missing pc_id
+            status = getattr(e, "status_code", 500)
+            detail = getattr(e, "detail", str(e))
+            return web.json_response({"error": detail}, status=status)
+        return web.json_response({"ok": True})
 
     # Health check endpoint
     async def health(request):
@@ -1354,6 +1457,7 @@ When David asks you to do something — check email, look at calendar, update CR
 
     app = web.Application()
     app.router.add_post("/offer", handle_offer)
+    app.router.add_patch("/offer", handle_patch)
     app.router.add_get("/", health)
 
     logger.info(f"🚀 SmallWebRTC signaling server starting on port {WEBRTC_PORT}")

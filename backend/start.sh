@@ -25,6 +25,13 @@ else
     exit 1
 fi
 
+# Skip venv if USE_SYSTEM_PYTHON is set (e.g., GPU server with pre-installed deps)
+# Note: `exec cmd | tee` doesn't actually exec (pipe creates a subshell), so use exit instead.
+if [ "${USE_SYSTEM_PYTHON:-false}" = "true" ]; then
+    $PYTHON -u chief_bot.py "$@" 2>&1 | tee -a /tmp/chief-bot.log
+    exit $?
+fi
+
 # Activate virtual environment if it exists, or create it
 if [ -d "venv" ]; then
     source venv/bin/activate

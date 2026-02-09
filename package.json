@@ -7,6 +7,7 @@
   "main": "electron/main.js",
   "scripts": {
     "dev": "next dev",
+    "dev:https": "next dev --experimental-https --experimental-https-key certs/key.pem --experimental-https-cert certs/cert.pem",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",

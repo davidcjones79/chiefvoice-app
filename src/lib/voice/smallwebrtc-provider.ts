@@ -20,6 +20,14 @@ export class SmallWebRTCProvider implements VoiceProvider {
   private maxReconnectAttempts = 3;
   private intentionalDisconnect = false;
   private signalingUrl: string | null = null;
+  private remoteAudioElement: HTMLAudioElement | null = null;
+
+  /** Apply current muted state to the transport */
+  private applyMicState(): void {
+    if (!this.client) return;
+    console.log(`[SmallWebRTCProvider] Applying mic state: ${this.muted ? "muted" : "unmuted"}`);
+    this.client.enableMic(!this.muted);
+  }
 
   async connect(config: VoiceConfig, callbacks: VoiceProviderCallbacks): Promise<void> {
     console.log("[SmallWebRTCProvider] connect() called");
@@ -69,7 +77,57 @@ export class SmallWebRTCProvider implements VoiceProvider {
       console.log("[SmallWebRTCProvider] Signaling URL:", this.signalingUrl);
 
       // Create SmallWebRTC transport — handles audio natively (no manual audio elements)
-      const transport = new SmallWebRTCTransport();
+      const transport = new SmallWebRTCTransport({
+        iceServers: [
+          { urls: ["stun:stun.l.google.com:19302"] },
+          { urls: ["stun:stun1.l.google.com:19302"] },
+        ],
+        waitForICEGathering: true, // Gather all candidates before offer — avoids PATCH trickle
+      });
+
+      // Hook into RTCPeerConnection's ontrack event DIRECTLY for remote audio.
+      // This bypasses PipecatClient's onTrackStarted callback entirely, which
+      // fires for BOTH local mic tracks and remote tracks (causing self-echo
+      // when we create <audio> elements for local tracks).
+      // RTCPeerConnection.ontrack ONLY fires for remote tracks per WebRTC spec.
+      const setupRemoteAudio = (pc: RTCPeerConnection) => {
+        const attachRemoteTrack = (track: MediaStreamTrack) => {
+          if (track.kind !== "audio") return;
+          console.log("[SmallWebRTCProvider] Remote audio track from PC — attaching to <audio> element");
+          if (this.remoteAudioElement) {
+            this.remoteAudioElement.pause();
+            this.remoteAudioElement.srcObject = null;
+            this.remoteAudioElement.remove();
+          }
+          const audio = document.createElement("audio");
+          audio.srcObject = new MediaStream([track]);
+          audio.autoplay = true;
+          audio.style.display = "none";
+          document.body.appendChild(audio);
+          audio.play().catch(e => console.error("[SmallWebRTCProvider] Audio play failed:", e));
+          this.remoteAudioElement = audio;
+        };
+
+        // Handle tracks that already arrived during SDP negotiation
+        for (const receiver of pc.getReceivers()) {
+          if (receiver.track) attachRemoteTrack(receiver.track);
+        }
+        // Handle future tracks (renegotiation, etc.)
+        pc.addEventListener("track", (event) => {
+          attachRemoteTrack(event.track);
+        });
+      };
+
+      // Poll for transport.pc (created during connect(), before onConnected)
+      const pcCheckInterval = setInterval(() => {
+        const pc = (transport as any).pc as RTCPeerConnection | null;
+        if (pc) {
+          clearInterval(pcCheckInterval);
+          setupRemoteAudio(pc);
+        }
+      }, 50);
+      // Safety: stop polling after 10s
+      setTimeout(() => clearInterval(pcCheckInterval), 10000);
 
       this.client = new PipecatClient({
         transport,
@@ -78,6 +136,15 @@ export class SmallWebRTCProvider implements VoiceProvider {
         callbacks: {
           onConnected: () => {
             console.log("[SmallWebRTCProvider] Connected");
+            clearInterval(pcCheckInterval);
+            // Final check: set up remote audio from PC if not done yet
+            const pc = (transport as any).pc as RTCPeerConnection | null;
+            if (pc && !this.remoteAudioElement) {
+              setupRemoteAudio(pc);
+            }
+            // Apply mic state immediately on connection to prevent echo
+            // and ensure push-to-talk works from the start.
+            this.applyMicState();
             callbacks.onStatusChange("connected");
           },
           onDisconnected: () => {
@@ -90,7 +157,7 @@ export class SmallWebRTCProvider implements VoiceProvider {
               setTimeout(async () => {
                 try {
                   if (this.client && this.signalingUrl) {
-                    await this.client.connect({ url: this.signalingUrl });
+                    await this.client.connect({ webrtcRequestParams: { endpoint: this.signalingUrl } });
                     this.reconnectAttempts = 0;
                     console.log("[SmallWebRTCProvider] Reconnected successfully");
                   }
@@ -109,6 +176,8 @@ export class SmallWebRTCProvider implements VoiceProvider {
           onBotReady: () => {
             console.log("[SmallWebRTCProvider] Bot ready");
             this.reconnectAttempts = 0;
+            // Datachannel is now open — safe to toggle mic
+            this.applyMicState();
             callbacks.onStatusChange("listening");
           },
           onBotStartedSpeaking: () => {
@@ -175,27 +244,17 @@ export class SmallWebRTCProvider implements VoiceProvider {
         },
       });
 
-      // Connect via SDP exchange — no Daily room, direct P2P
-      console.log("[SmallWebRTCProvider] Connecting via SDP exchange...");
-      await this.client.connect({ url: this.signalingUrl });
-      console.log("[SmallWebRTCProvider] Connected successfully");
-
-      // SmallWebRTC handles audio tracks automatically — no manual audio element needed
-
-      // Check hands-free mode preference
+      // Set desired mic state now — actual enableMic call deferred to onBotReady
       const isHandsFree = typeof window !== "undefined"
         ? localStorage.getItem("chief-hands-free-mode") === "true"
         : false;
+      this.muted = !isHandsFree;
 
-      if (isHandsFree) {
-        console.log("[SmallWebRTCProvider] Hands-free mode: keeping mic open");
-        this.client.enableMic(true);
-        this.muted = false;
-      } else {
-        console.log("[SmallWebRTCProvider] PTT mode: muting mic");
-        this.client.enableMic(false);
-        this.muted = true;
-      }
+      // Connect via SDP exchange — no Daily room, direct P2P
+      console.log("[SmallWebRTCProvider] Connecting via SDP exchange...");
+      await this.client.connect({ webrtcRequestParams: { endpoint: this.signalingUrl } });
+      console.log("[SmallWebRTCProvider] Connected successfully");
+
       this.isConnecting = false;
 
     } catch (error) {
@@ -221,6 +280,14 @@ export class SmallWebRTCProvider implements VoiceProvider {
       fetch(`/api/pipecat/webrtc/${this.callId}`, {
         method: "DELETE",
       }).catch(err => console.error("Failed to cleanup WebRTC bot:", err));
+    }
+
+    // Clean up remote audio element
+    if (this.remoteAudioElement) {
+      this.remoteAudioElement.pause();
+      this.remoteAudioElement.srcObject = null;
+      this.remoteAudioElement.remove();
+      this.remoteAudioElement = null;
     }
 
     this.callbacks?.onStatusChange("ended");

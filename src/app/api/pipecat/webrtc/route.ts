@@ -1,100 +1,46 @@
 import { NextRequest, NextResponse } from "next/server";
-import { spawn, ChildProcess } from "child_process";
-import path from "path";
 
-// Store active WebRTC bot processes
-const activeWebRTCBots = new Map<string, { process: ChildProcess; port: number }>();
+/**
+ * SmallWebRTC session endpoint.
+ *
+ * The bot runs as a long-lived process (started manually or via systemd)
+ * on BOT_PORT (default 9000).  SmallWebRTCRequestHandler inside the bot
+ * creates a new pipeline per SDP offer, so one process serves many calls.
+ *
+ * POST  → health-check the bot and return the HTTPS signaling proxy URL
+ * DELETE → no-op (bot lifecycle is external)
+ */
 
-// Port range for WebRTC signaling servers (each bot gets its own port)
-const BASE_PORT = 9000;
-let nextPortOffset = 0;
-
-function allocatePort(): number {
-  const port = BASE_PORT + (nextPortOffset % 100);
-  nextPortOffset++;
-  return port;
-}
-
-async function waitForPort(port: number, timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const res = await fetch(`http://localhost:${port}/`, { signal: AbortSignal.timeout(500) });
-      // Any response (even 404) means the server is up
-      return true;
-    } catch {
-      // Server not ready yet
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  return false;
-}
+const BOT_PORT = parseInt(process.env.WEBRTC_BOT_PORT || "9000", 10);
 
 export async function POST(request: NextRequest) {
   try {
-    const { callId, config, voice, ttsProvider } = await request.json();
+    const { callId } = await request.json();
 
     if (!callId) {
       return NextResponse.json({ error: "callId is required" }, { status: 400 });
     }
 
-    console.log(`[WebRTC API] Starting WebRTC bot for call: ${callId}`);
+    console.log(`[WebRTC API] New call: ${callId}, checking bot on port ${BOT_PORT}`);
 
-    const port = allocatePort();
-    const backendDir = path.join(process.cwd(), "backend");
-    const startScript = path.join(backendDir, "start.sh");
-
-    const botProcess = spawn(startScript, ["--webrtc", "--port", String(port)], {
-      cwd: backendDir,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        CALL_ID: callId,
-        WEBRTC_PORT: String(port),
-        WEBRTC_MODE: "true",
-        TTS_PROVIDER: ttsProvider || "openai",
-        OPENAI_VOICE: voice || "shimmer",
-        ELEVENLABS_VOICE_ID: voice || "shimmer",
-        PIPER_VOICE: voice || "shimmer",
-      },
-    });
-
-    activeWebRTCBots.set(callId, { process: botProcess, port });
-
-    botProcess.stdout?.on("data", (data) => {
-      console.log(`[WebRTC Bot ${callId}] ${data.toString().trim()}`);
-    });
-
-    botProcess.stderr?.on("data", (data) => {
-      console.error(`[WebRTC Bot ${callId}] ${data.toString().trim()}`);
-    });
-
-    botProcess.on("error", (error) => {
-      console.error(`[WebRTC Bot ${callId}] Process error:`, error);
-      activeWebRTCBots.delete(callId);
-    });
-
-    botProcess.on("exit", (code) => {
-      console.log(`[WebRTC Bot ${callId}] Process exited with code: ${code}`);
-      activeWebRTCBots.delete(callId);
-    });
-
-    // Wait for the bot's signaling server to be ready
-    const ready = await waitForPort(port, 5000);
-    if (!ready) {
-      console.error(`[WebRTC API] Bot signaling server not ready on port ${port}`);
-      botProcess.kill();
-      activeWebRTCBots.delete(callId);
+    // Verify the bot is running
+    try {
+      await fetch(`http://localhost:${BOT_PORT}/`, { signal: AbortSignal.timeout(2000) });
+    } catch {
       return NextResponse.json(
-        { error: "Bot signaling server failed to start" },
-        { status: 500 }
+        { error: "WebRTC bot is not running. Start it with: start.sh --webrtc --port 9000" },
+        { status: 503 }
       );
     }
 
-    console.log(`[WebRTC API] Bot ready on port ${port}`);
+    // Return the signaling URL via our HTTPS proxy to avoid mixed-content blocks.
+    const proto = request.headers.get("x-forwarded-proto") || (request.url.startsWith("https") ? "https" : "http");
+    const host = request.headers.get("host") || "localhost:3000";
+    const signalingUrl = `${proto}://${host}/api/pipecat/webrtc/offer`;
+    console.log(`[WebRTC API] Signaling URL: ${signalingUrl} (proxying to localhost:${BOT_PORT})`);
 
     return NextResponse.json({
-      signaling_url: `http://localhost:${port}/offer`,
+      signaling_url: signalingUrl,
       call_id: callId,
     });
 
@@ -107,31 +53,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-export async function DELETE(request: NextRequest) {
-  try {
-    const url = new URL(request.url);
-    const callId = url.pathname.split("/").pop();
-
-    if (!callId) {
-      return NextResponse.json({ error: "callId is required" }, { status: 400 });
-    }
-
-    console.log(`[WebRTC API] Cleaning up call: ${callId}`);
-
-    const bot = activeWebRTCBots.get(callId);
-    if (bot) {
-      bot.process.kill();
-      activeWebRTCBots.delete(callId);
-      console.log(`[WebRTC API] Bot process killed: ${callId}`);
-    }
-
-    return NextResponse.json({ success: true });
-
-  } catch (error) {
-    console.error("[WebRTC API] Error cleaning up:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
-    );
-  }
+export async function DELETE() {
+  // Bot lifecycle is managed externally — nothing to clean up here
+  return NextResponse.json({ success: true });
 }
