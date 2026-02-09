@@ -210,6 +210,15 @@ CHIEFVOICE_GATEWAY_URL = os.getenv("CHIEFVOICE_GATEWAY_URL", "ws://localhost:187
 CHIEFVOICE_GATEWAY_TOKEN = os.getenv("CHIEFVOICE_GATEWAY_TOKEN")
 USE_GATEWAY = os.getenv("USE_GATEWAY", "false").lower() == "true"
 
+# WebRTC mode configuration
+WEBRTC_MODE = os.getenv("WEBRTC_MODE", "false").lower() == "true" or "--webrtc" in sys.argv
+WEBRTC_PORT = int(os.getenv("WEBRTC_PORT", "9000"))
+
+# Parse --port flag from argv
+for i, arg in enumerate(sys.argv):
+    if arg == "--port" and i + 1 < len(sys.argv):
+        WEBRTC_PORT = int(sys.argv[i + 1])
+
 # Outbound call configuration
 OUTBOUND_MODE = os.getenv("OUTBOUND_MODE", "false").lower() == "true"
 OUTBOUND_REASON = os.getenv("OUTBOUND_REASON", "")
@@ -1021,5 +1030,353 @@ When David asks you to do something — check email, look at calendar, update CR
     logger.info("🛑 Bot stopped.")
 
 
+async def main_webrtc():
+    """Main entry point for SmallWebRTC mode — P2P voice without Daily.co"""
+    from aiohttp import web
+    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+    from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+    from pipecat.transports.smallwebrtc.request_handler import (
+        SmallWebRTCRequestHandler,
+        SmallWebRTCRequest,
+    )
+    from pipecat.transports.base_transport import TransportParams
+
+    logger.info(f"🌐 Starting Chief Bot in SmallWebRTC mode on port {WEBRTC_PORT}...")
+
+    call_id = os.getenv("CALL_ID", f"webrtc-{int(time.time())}")
+
+    # Validate configuration
+    if not DEEPGRAM_API_KEY:
+        logger.error("DEEPGRAM_API_KEY not set")
+        return
+    if not OPENAI_API_KEY:
+        logger.error("OPENAI_API_KEY not set")
+        return
+
+    # Initialize services (same as Daily mode)
+    deepgram_options = LiveOptions(
+        model="nova-2",
+        language="en-US",
+        smart_format=True,
+        interim_results=True,
+        punctuate=True,
+        encoding="linear16",
+        sample_rate=16000,
+        channels=1,
+        filler_words=False,
+        endpointing=300,
+    )
+    stt = DeepgramSTTService(api_key=DEEPGRAM_API_KEY, live_options=deepgram_options)
+
+    if TTS_PROVIDER == "elevenlabs":
+        if not ELEVENLABS_API_KEY:
+            logger.error("ELEVENLABS_API_KEY not set")
+            return
+        tts = ElevenLabsTTSService(
+            api_key=ELEVENLABS_API_KEY,
+            voice_id=ELEVENLABS_VOICE_ID,
+            sample_rate=24000,
+        )
+    elif TTS_PROVIDER == "piper":
+        tts = PiperTTSService(voice_id=PIPER_VOICE, sample_rate=22050)
+        tts._sample_rate = 22050
+    else:
+        tts = OpenAITTSService(
+            api_key=OPENAI_API_KEY,
+            voice=OPENAI_VOICE,
+            sample_rate=24000,
+            speed=1.15,
+        )
+
+    llm = OpenAILLMService(api_key=OPENAI_API_KEY, model="gpt-4o")
+
+    # Optional gateway client
+    gateway_client = None
+    if USE_GATEWAY and CHIEFVOICE_GATEWAY_TOKEN:
+        gateway_client = ChiefVoiceGatewayClient(
+            gateway_url=CHIEFVOICE_GATEWAY_URL,
+            token=CHIEFVOICE_GATEWAY_TOKEN,
+            call_id=call_id,
+        )
+
+    tools_context = ""
+    tools_path = os.path.expanduser("~/clawd/TOOLS.md")
+    if os.path.exists(tools_path):
+        try:
+            with open(tools_path, "r") as f:
+                tools_context = f"\n\n## Available Tools & Integrations\n\n{f.read()}"
+        except Exception:
+            pass
+
+    llm_messages = [
+        {
+            "role": "system",
+            "content": f"""You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
+
+You have access to forty-three tools across nine integrations including Gmail, Google Calendar, Pipedrive CRM, Todoist, Notion, GitHub, Confluence, and VAPI for outbound calls.
+
+When David asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
+{tools_context}"""
+        }
+    ]
+
+    vad_params = VADParams(
+        confidence=0.7,
+        start_secs=0.15,
+        stop_secs=0.7,
+        min_volume=0.6,
+    )
+    vad_analyzer = SileroVADAnalyzer(sample_rate=16000, params=vad_params)
+
+    handler = SmallWebRTCRequestHandler()
+
+    async def handle_offer(request):
+        """SmallWebRTC SDP offer handler"""
+        body = await request.json()
+        sdp = body.get("sdp")
+        sdp_type = body.get("type", "offer")
+
+        if not sdp:
+            return web.json_response({"error": "Missing 'sdp'"}, status=400)
+
+        async def on_connection(conn):
+            transport = SmallWebRTCTransport(
+                webrtc_connection=conn,
+                params=TransportParams(
+                    audio_in_enabled=True,
+                    audio_in_sample_rate=16000,
+                    audio_out_enabled=True,
+                    audio_out_sample_rate=24000,
+                    vad_enabled=True,
+                    vad_analyzer=vad_analyzer,
+                ),
+            )
+
+            user_aggregator = LLMUserResponseAggregator(llm_messages)
+            assistant_aggregator = LLMAssistantResponseAggregator(llm_messages)
+
+            pipeline = Pipeline([
+                transport.input(),
+                stt,
+                user_aggregator,
+                llm,
+                tts,
+                transport.output(),
+                assistant_aggregator,
+            ])
+
+            task = PipelineTask(
+                pipeline,
+                params=PipelineParams(
+                    allow_interruptions=True,
+                    enable_metrics=True,
+                    enable_usage_metrics=True,
+                ),
+            )
+
+            @transport.event_handler("on_client_connected")
+            async def on_client_connected(transport_obj, client):
+                logger.info(f"🎉 WebRTC client connected")
+                await asyncio.sleep(0.5)
+                greeting = "Hey David. What can I help you with?"
+                await task.queue_frame(TTSSpeakFrame(text=greeting))
+
+            @transport.event_handler("on_client_disconnected")
+            async def on_client_disconnected(transport_obj, client):
+                logger.info("👋 WebRTC client disconnected")
+                if gateway_client:
+                    try:
+                        memory_prompt = (
+                            "[SYSTEM: The voice call has ended. Please briefly summarize this conversation "
+                            "(2-3 sentences max) and save anything important to memory/voice-sessions.md. "
+                            "Include: date, key topics discussed, any action items or decisions made. "
+                            "Do not respond with speech - just save to file silently.]"
+                        )
+                        await gateway_client.send_message(memory_prompt)
+                    except Exception as e:
+                        logger.error(f"Failed to save memory: {e}")
+                    finally:
+                        await gateway_client.close()
+                await task.cancel()
+
+            # Install gateway interceptor if configured (same as Daily mode)
+            if gateway_client:
+                original_push = user_aggregator.push_frame
+                recent_immediate = []
+                recent_fillers = []
+                recent_bot_responses = []
+                last_bot_speech_end = 0.0
+                bot_is_speaking = False
+                last_processed_message = ""
+                processing_in_progress = False
+
+                async def intercept_and_forward(frame, direction=None):
+                    nonlocal recent_immediate, recent_fillers, recent_bot_responses
+                    nonlocal last_bot_speech_end, bot_is_speaking
+                    nonlocal last_processed_message, processing_in_progress
+
+                    if isinstance(frame, LLMMessagesFrame):
+                        messages = frame.messages
+                        if messages and messages[-1].get("role") == "user":
+                            user_message = messages[-1].get("content", "")
+
+                            if user_message == last_processed_message:
+                                return
+                            if processing_in_progress:
+                                try:
+                                    await task.queue_frame(StartInterruptionFrame())
+                                except Exception:
+                                    pass
+                                return
+                            if bot_is_speaking and is_echo(user_message, recent_bot_responses, threshold=0.3):
+                                return
+
+                            time_since_bot = time.time() - last_bot_speech_end
+                            if 0 <= time_since_bot < 0.3:
+                                return
+                            if is_echo(user_message, recent_bot_responses, threshold=0.4):
+                                return
+
+                            processing_in_progress = True
+                            last_processed_message = user_message
+                            simple_chat = is_simple_chat(user_message)
+                            first_chunk_received = asyncio.Event()
+                            ack_task_inner = None
+
+                            def _pick_phrase(phrase_list, recent_list, max_recent=5):
+                                available = [p for p in phrase_list if p not in recent_list]
+                                if not available:
+                                    recent_list.clear()
+                                    available = phrase_list
+                                phrase = random.choice(available)
+                                recent_list.append(phrase)
+                                if len(recent_list) > max_recent:
+                                    recent_list.pop(0)
+                                return phrase
+
+                            async def send_ack():
+                                await asyncio.sleep(2)
+                                if not first_chunk_received.is_set():
+                                    phrase = _pick_phrase(IMMEDIATE_PHRASES, recent_immediate)
+                                    await task.queue_frame(TTSSpeakFrame(text=phrase))
+
+                            if not simple_chat:
+                                ack_task_inner = asyncio.create_task(send_ack())
+
+                            try:
+                                full_response = ""
+                                text_buffer = ""
+                                chunks_sent = 0
+
+                                async for chunk in gateway_client.stream_message(user_message):
+                                    full_response += chunk
+                                    text_buffer += chunk
+
+                                    if not first_chunk_received.is_set():
+                                        first_chunk_received.set()
+                                        bot_is_speaking = True
+
+                                    should_send = False
+                                    send_text = ""
+                                    min_chunk = 30 if chunks_sent == 0 else 60
+
+                                    for i, char in enumerate(text_buffer):
+                                        if char in '.!?\n' and i >= min_chunk - 10:
+                                            end_idx = i + 1
+                                            while end_idx < len(text_buffer) and text_buffer[end_idx] in ' \n':
+                                                end_idx += 1
+                                            send_text = text_buffer[:end_idx]
+                                            text_buffer = text_buffer[end_idx:]
+                                            should_send = True
+                                            break
+
+                                    if not should_send and len(text_buffer) > 100:
+                                        break_point = text_buffer.rfind(' ', 0, 100)
+                                        if break_point > 30:
+                                            send_text = text_buffer[:break_point + 1]
+                                            text_buffer = text_buffer[break_point + 1:]
+                                            should_send = True
+
+                                    if should_send and send_text.strip():
+                                        chunks_sent += 1
+                                        await task.queue_frame(TTSSpeakFrame(text=send_text))
+
+                                if text_buffer.strip():
+                                    chunks_sent += 1
+                                    await task.queue_frame(TTSSpeakFrame(text=text_buffer))
+
+                                if chunks_sent > 0 and full_response.strip():
+                                    recent_bot_responses.append(full_response)
+                                    if len(recent_bot_responses) > 3:
+                                        recent_bot_responses.pop(0)
+                                    estimated_tts_duration = len(full_response) / 15
+                                    last_bot_speech_end = time.time() + estimated_tts_duration
+                                    bot_is_speaking = False
+                                    processing_in_progress = False
+
+                                    if is_farewell(user_message):
+                                        await asyncio.sleep(3.0)
+                                        await task.queue_frame(EndFrame())
+                                    return
+
+                            except Exception as e:
+                                logger.error(f"Gateway error: {e}")
+                                first_chunk_received.set()
+                            finally:
+                                processing_in_progress = False
+                                bot_is_speaking = False
+                                if ack_task_inner and not ack_task_inner.done():
+                                    ack_task_inner.cancel()
+
+                    if direction is not None:
+                        await original_push(frame, direction)
+                    else:
+                        await original_push(frame)
+
+                user_aggregator.push_frame = intercept_and_forward
+
+            runner = PipelineRunner()
+            try:
+                await runner.run(task)
+            except Exception as e:
+                logger.error(f"Pipeline error: {e}", exc_info=True)
+            finally:
+                await runner.cleanup()
+
+        webrtc_request = SmallWebRTCRequest(sdp=sdp, type=sdp_type)
+        answer = await handler.handle_web_request(webrtc_request, on_connection)
+        return web.json_response(answer)
+
+    # Health check endpoint
+    async def health(request):
+        return web.json_response({"status": "ok", "mode": "webrtc"})
+
+    app = web.Application()
+    app.router.add_post("/offer", handle_offer)
+    app.router.add_get("/", health)
+
+    logger.info(f"🚀 SmallWebRTC signaling server starting on port {WEBRTC_PORT}")
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", WEBRTC_PORT)
+    await site.start()
+    logger.info(f"✅ Signaling server ready on http://0.0.0.0:{WEBRTC_PORT}/offer")
+
+    # Keep running until interrupted
+    try:
+        await asyncio.Event().wait()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        await runner.cleanup()
+        if gateway_client:
+            await gateway_client.close()
+    logger.info("🛑 WebRTC bot stopped.")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    if WEBRTC_MODE:
+        asyncio.run(main_webrtc())
+    else:
+        asyncio.run(main())

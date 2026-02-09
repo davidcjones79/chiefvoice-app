@@ -37,6 +37,7 @@
     "@picovoice/web-voice-processor": "^4.0.9",
     "@pipecat-ai/client-js": "^1.5.0",
     "@pipecat-ai/daily-transport": "^1.5.0",
+    "@pipecat-ai/small-webrtc-transport": "^1.8.1",
     "@vapi-ai/web": "^2.5.2",
     "better-sqlite3": "^12.6.2",
     "class-variance-authority": "^0.7.1",
