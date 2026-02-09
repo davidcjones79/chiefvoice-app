@@ -11,7 +11,7 @@ interface ConnectScreenProps {
 
 export function ConnectScreen({ onConnect }: ConnectScreenProps) {
   const [gatewayUrl, setGatewayUrl] = useState(
-    process.env.NEXT_PUBLIC_DEFAULT_GATEWAY_URL || "ws://localhost:18789"
+    process.env.NEXT_PUBLIC_DEFAULT_GATEWAY_URL || ""
   );
   const [token, setToken] = useState("");
   const [isConnecting, setIsConnecting] = useState(false);
@@ -52,7 +52,7 @@ export function ConnectScreen({ onConnect }: ConnectScreenProps) {
               type="url"
               value={gatewayUrl}
               onChange={(e) => setGatewayUrl(e.target.value)}
-              placeholder="ws://localhost:18789"
+              placeholder="wss://your-server:18789"
             />
           </div>
 

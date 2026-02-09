@@ -11,6 +11,8 @@ import {
   ListChecks,
   Sparkles,
   ArrowLeft,
+  Plug,
+  ChevronRight,
 } from "lucide-react";
 import Link from "next/link";
 import type { ResponseFormat } from "@/lib/modes";
@@ -122,6 +124,20 @@ export default function SettingsPage() {
 
         {/* Content */}
         <div className="settings-page-content">
+          {/* Integrations link */}
+          <Link href="/settings/integrations" className="integ-nav-card">
+            <div className="integ-nav-card-icon">
+              <Plug className="w-5 h-5" />
+            </div>
+            <div className="integ-nav-card-info">
+              <span className="integ-nav-card-title">Integrations</span>
+              <span className="integ-nav-card-desc">
+                Connect APIs, CRMs, and services to unlock new tools
+              </span>
+            </div>
+            <ChevronRight className="w-5 h-5 integ-nav-card-chevron" />
+          </Link>
+
           {/* Input Mode */}
           <section className="settings-page-section">
             <h2 className="settings-page-section-title">Input Mode</h2>
