@@ -6,7 +6,7 @@ module.exports = {
     cwd: '/Users/davidjones/projects/chiefvoice-app',
     env: {
       NODE_ENV: 'production',
-      CHIEFVOICE_GATEWAY_TOKEN: '824d0bd233b88eb56be1e11d58b23de26bad3b777ec1faf0',
+      CHIEFVOICE_GATEWAY_TOKEN: '26b0ec0c4bcdbc2cf09c04890d88c46808e37fa5fb40d36caa6f988266ccd1c1',
       CHIEFVOICE_GATEWAY_URL: 'ws://localhost:18789',
     },
     // Don't inherit env from parent
