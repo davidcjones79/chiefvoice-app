@@ -1,0 +1,26 @@
+[env]
+CHIEFVOICE_FRONTEND_PORT = "3000"
+
+[tasks.dev]
+description = "Start frontend dev server"
+run = "npm run dev -- --port $CHIEFVOICE_FRONTEND_PORT"
+
+[tasks.build]
+description = "Build for production"
+run = "npm run build"
+
+[tasks.lint]
+description = "Lint with eslint"
+run = "npm run lint"
+
+[tasks."dev:https"]
+description = "Start frontend dev server with HTTPS"
+run = "npm run dev:https -- --port $CHIEFVOICE_FRONTEND_PORT"
+
+[tasks."build:ios"]
+description = "Build for iOS"
+run = "npm run cap:sync"
+
+[tasks."build:tauri"]
+description = "Build Tauri desktop app"
+run = "npm run tauri:build"

@@ -72,3 +72,6 @@ src-tauri/target/
 
 # Logs
 caddy.log
+
+# mise
+.mise.local
