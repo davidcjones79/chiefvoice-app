@@ -21,8 +21,8 @@ Chief provides a push-to-talk voice interface to ChiefVoice's AI agents, with su
 npm install
 
 # Copy environment config
-cp .env.example .env.local
-# Edit .env.local with your API keys
+cp .env.example .env
+# Edit .env with your API keys
 
 # Run development server
 npm run dev

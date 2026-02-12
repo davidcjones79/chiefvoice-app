@@ -7,14 +7,14 @@ import { randomBytes } from "crypto";
 import { KNOWN_ENV_VARS, FIELD_BY_ENV_VAR } from "@/lib/integrations";
 
 /**
- * Path to the .env.local file in the project root.
+ * Path to the .env file in the project root.
  * process.cwd() in Next.js API routes is the project root.
  */
-function envLocalPath(): string {
-  return join(process.cwd(), ".env.local");
+function envPath(): string {
+  return join(process.cwd(), ".env");
 }
 
-/** Parse .env.local into ordered entries preserving comments and blank lines. */
+/** Parse .env into ordered entries preserving comments and blank lines. */
 interface EnvEntry {
   type: "comment" | "blank" | "var";
   raw: string;
@@ -59,7 +59,7 @@ function maskValue(value: string): string {
  * Never returns full secret values.
  */
 export async function GET() {
-  const filePath = envLocalPath();
+  const filePath = envPath();
   const envMap = new Map<string, string>();
 
   if (existsSync(filePath)) {
@@ -97,7 +97,7 @@ export async function GET() {
 }
 
 /**
- * POST — Update .env.local with provided key-value pairs.
+ * POST — Update .env with provided key-value pairs.
  * Only accepts keys in KNOWN_ENV_VARS.
  * Empty string = clear the var. Missing key = leave unchanged.
  * Writes atomically via temp file + rename.
@@ -122,7 +122,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
   }
 
-  const filePath = envLocalPath();
+  const filePath = envPath();
   let entries: EnvEntry[] = [];
 
   if (existsSync(filePath)) {
@@ -158,7 +158,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Write atomically: temp file → rename
-  const tmpPath = join(tmpdir(), `.env.local.tmp.${randomBytes(4).toString("hex")}`);
+  const tmpPath = join(tmpdir(), `.env.tmp.${randomBytes(4).toString("hex")}`);
   const content = entriesToString(entries);
   await writeFile(tmpPath, content, "utf-8");
   await rename(tmpPath, filePath);

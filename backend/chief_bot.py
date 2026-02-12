@@ -213,8 +213,8 @@ except Exception:
     DailyParams = None  # type: ignore
     DailyTransport = None  # type: ignore
 
-# Load environment variables from parent directory's .env.local
-env_path = os.path.join(os.path.dirname(__file__), '..', '.env.local')
+# Load environment variables from parent directory's .env
+env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path, override=True)
 
 # Configuration

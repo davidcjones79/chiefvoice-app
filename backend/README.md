@@ -31,7 +31,7 @@ The TTS provider (OpenAI or ElevenLabs) is set dynamically from the UI:
 - `OPENAI_VOICE` - OpenAI voice ID (e.g., "shimmer", "nova")
 - `ELEVENLABS_VOICE_ID` - ElevenLabs voice ID
 
-These are passed as environment variables when spawning the bot, NOT read from `.env.local`.
+These are passed as environment variables when spawning the bot, NOT read from `.env`.
 
 ### Troubleshooting
 

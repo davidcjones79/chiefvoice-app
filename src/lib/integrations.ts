@@ -2,7 +2,7 @@
  * Integration definitions for the ChiefVoice marketplace.
  *
  * Each integration describes a service that can be configured via env vars
- * stored in .env.local. The bot reads these at startup.
+ * stored in .env. The bot reads these at startup.
  */
 
 export interface IntegrationField {

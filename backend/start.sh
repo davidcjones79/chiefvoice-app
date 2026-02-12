@@ -6,8 +6,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Load environment variables from parent .env.local
-ENV_FILE="../.env.local"
+# Load environment variables from parent .env
+ENV_FILE="../.env"
 if [ -f "$ENV_FILE" ]; then
     set -a
     source "$ENV_FILE"
