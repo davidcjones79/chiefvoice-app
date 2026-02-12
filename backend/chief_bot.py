@@ -215,7 +215,7 @@ except Exception:
 
 # Load environment variables from parent directory's .env.local
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env.local')
-load_dotenv(env_path)
+load_dotenv(env_path, override=True)
 
 # Configuration
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
@@ -226,6 +226,8 @@ ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "vu6gUGJTkGGUmQLLHG2D")
 PIPER_VOICE = os.getenv("PIPER_VOICE", "en_US-lessac-high")
 PIPER_DOWNLOAD_DIR = os.getenv("PIPER_DOWNLOAD_DIR", "/home/user/piper-voices")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "openai")
+USER_NAME = os.getenv("USER_NAME", "Bugs")
+USER_FULL_NAME = os.getenv("USER_FULL_NAME", "Alan Weidel")
 CHIEFVOICE_GATEWAY_URL = os.getenv("CHIEFVOICE_GATEWAY_URL", "ws://localhost:18789")
 CHIEFVOICE_GATEWAY_TOKEN = os.getenv("CHIEFVOICE_GATEWAY_TOKEN")
 USE_GATEWAY = os.getenv("USE_GATEWAY", "false").lower() == "true"
@@ -557,28 +559,37 @@ async def main():
         )
         logger.info("✅ Gateway client configured (will intercept messages)")
 
-    # Load TOOLS.md for integration context
+    # Load TOOLS.md for integration context (only when gateway is active)
     tools_context = ""
-    tools_path = os.path.expanduser("~/clawd/TOOLS.md")
-    if os.path.exists(tools_path):
-        try:
-            with open(tools_path, "r") as f:
-                tools_context = f"\n\n## Available Tools & Integrations\n\n{f.read()}"
-            logger.info(f"✅ Loaded TOOLS.md ({len(tools_context)} chars)")
-        except Exception as e:
-            logger.warning(f"Failed to load TOOLS.md: {e}")
+    if USE_GATEWAY and gateway_client:
+        tools_path = os.path.expanduser("~/clawd/TOOLS.md")
+        if os.path.exists(tools_path):
+            try:
+                with open(tools_path, "r") as f:
+                    tools_context = f"\n\n## Available Tools & Integrations\n\n{f.read()}"
+                logger.info(f"✅ Loaded TOOLS.md ({len(tools_context)} chars)")
+            except Exception as e:
+                logger.warning(f"Failed to load TOOLS.md: {e}")
 
     # Set up initial context for the LLM
-    llm_messages = [
-        {
-            "role": "system",
-            "content": f"""You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+    if USE_GATEWAY and gateway_client:
+        system_content = f"""You are Chief, {USER_FULL_NAME}'s AI chief of staff, speaking via the ChiefVoice voice interface.
 Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
 
 You have access to forty-three tools across nine integrations including Gmail, Google Calendar, Pipedrive CRM, Todoist, Notion, GitHub, Confluence, and VAPI for outbound calls.
 
-When David asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
+When {USER_NAME} asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
 {tools_context}"""
+    else:
+        system_content = f"""You are Chief, {USER_FULL_NAME}'s AI chief of staff, speaking via the ChiefVoice voice interface.
+Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
+
+You are running in local-only mode without any tool integrations. You can have conversations, answer questions, brainstorm, and help think through problems — but you CANNOT access email, calendar, CRM, or any external services. If asked to do something that requires tools, honestly say you're not connected to those services right now. Never make up or fabricate data."""
+
+    llm_messages = [
+        {
+            "role": "system",
+            "content": system_content,
         }
     ]
     
@@ -959,11 +970,11 @@ When David asks you to do something — check email, look at calendar, update CR
         # Different greeting for outbound (AI-initiated) calls
         if OUTBOUND_MODE:
             urgency_prefix = {
-                "low": "Hey Dave,",
-                "medium": "Hey Dave,",
-                "high": "Dave,",
-                "critical": "Dave, this is urgent."
-            }.get(OUTBOUND_URGENCY, "Hey Dave,")
+                "low": f"Hey {USER_NAME},",
+                "medium": f"Hey {USER_NAME},",
+                "high": f"{USER_NAME},",
+                "critical": f"{USER_NAME}, this is urgent."
+            }.get(OUTBOUND_URGENCY, f"Hey {USER_NAME},")
 
             greeting = f"{urgency_prefix} I'm calling because {OUTBOUND_REASON}."
             if OUTBOUND_CONTEXT:
@@ -978,7 +989,7 @@ When David asks you to do something — check email, look at calendar, update CR
                         logger.error(f"Failed to send outbound context: {e}")
             logger.info(f"📞 Outbound call - Reason: {OUTBOUND_REASON}, Urgency: {OUTBOUND_URGENCY}")
         else:
-            greeting = "Hey David. What can I help you with?"
+            greeting = f"Hey {USER_NAME}. What can I help you with?"
 
         logger.info(f"💬 Sending greeting: {greeting}")
 
@@ -1207,18 +1218,18 @@ async def main_webrtc():
 
             # Fresh message history per connection
             if gateway_client:
-                system_prompt = f"""You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+                system_prompt = f"""You are Chief, {USER_FULL_NAME}'s AI chief of staff, speaking via the ChiefVoice voice interface.
 Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
 
 You have access to forty-three tools across nine integrations including Gmail, Google Calendar, Pipedrive CRM, Todoist, Notion, GitHub, Confluence, and VAPI for outbound calls.
 
-When David asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
+When {USER_NAME} asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
 {tools_context}"""
             else:
-                system_prompt = """You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+                system_prompt = f"""You are Chief, {USER_FULL_NAME}'s AI chief of staff, speaking via the ChiefVoice voice interface.
 Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
 
-You are running in local-only mode without any tool integrations. You can have conversations, answer questions, brainstorm, and help think through problems — but you CANNOT access email, calendar, CRM, or any external services. If asked to do something that requires tools, honestly say you're not connected to those services right now."""
+You are running in local-only mode without any tool integrations. You can have conversations, answer questions, brainstorm, and help think through problems — but you CANNOT access email, calendar, CRM, or any external services. If asked to do something that requires tools, honestly say you're not connected to those services right now. Never make up or fabricate data."""
 
             conn_messages = [{"role": "system", "content": system_prompt}]
 
@@ -1248,7 +1259,7 @@ You are running in local-only mode without any tool integrations. You can have c
             async def on_client_connected(transport_obj, client):
                 logger.info(f"🎉 WebRTC client connected")
                 await asyncio.sleep(0.5)
-                greeting = "Hey David. What can I help you with?"
+                greeting = f"Hey {USER_NAME}. What can I help you with?"
                 await task.queue_frame(TTSSpeakFrame(text=greeting))
 
             @transport.event_handler("on_client_disconnected")
