@@ -25,6 +25,6 @@ run = "npm run cap:sync"
 description = "Build Tauri desktop app"
 run = "npm run tauri:build"
 
-[tasks.doctor]
+[tasks.status]
 description = "Check system configuration"
 file = "scripts/doctor.sh"
