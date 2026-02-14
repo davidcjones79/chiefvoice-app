@@ -82,7 +82,6 @@ export class SmallWebRTCProvider implements VoiceProvider {
           { urls: ["stun:stun.l.google.com:19302"] },
           { urls: ["stun:stun1.l.google.com:19302"] },
         ],
-        waitForICEGathering: true, // Gather all candidates before offer — avoids PATCH trickle
       });
 
       // Hook into RTCPeerConnection's ontrack event DIRECTLY for remote audio.

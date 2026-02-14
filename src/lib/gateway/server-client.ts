@@ -15,6 +15,9 @@ import type {
 const GATEWAY_URL = process.env.CHIEFVOICE_GATEWAY_URL || "ws://localhost:18789";
 const GATEWAY_TOKEN = process.env.CHIEFVOICE_GATEWAY_TOKEN || "";
 
+// Per-tenant connection cache
+const tenantConnections: Map<string, WebSocket> = new Map();
+
 // Debug: Log what we're loading from environment
 console.log("[Gateway] Environment variables:");
 console.log("  GATEWAY_URL:", GATEWAY_URL);

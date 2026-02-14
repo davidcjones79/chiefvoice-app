@@ -3,15 +3,15 @@ import { NextRequest, NextResponse } from "next/server";
 /**
  * SmallWebRTC session endpoint.
  *
- * The bot runs as a long-lived process (started manually or via systemd)
- * on BOT_PORT (default 9000).  SmallWebRTCRequestHandler inside the bot
- * creates a new pipeline per SDP offer, so one process serves many calls.
+ * Routes to the ChiefVoice gateway's integrated voice endpoint at
+ * GATEWAY_URL/api/voice/offer. The gateway runs SmallWebRTCRequestHandler
+ * inside the FastAPI process, creating a new pipeline per SDP offer.
  *
- * POST  → health-check the bot and return the HTTPS signaling proxy URL
- * DELETE → no-op (bot lifecycle is external)
+ * POST  → health-check the gateway and return the HTTPS signaling proxy URL
+ * DELETE → no-op (gateway manages bot lifecycle)
  */
 
-const BOT_PORT = parseInt(process.env.WEBRTC_BOT_PORT || "9000", 10);
+const GATEWAY_URL = process.env.CHIEFVOICE_GATEWAY_HTTP_URL || "http://localhost:8000";
 
 export async function POST(request: NextRequest) {
   try {
@@ -21,14 +21,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "callId is required" }, { status: 400 });
     }
 
-    console.log(`[WebRTC API] New call: ${callId}, checking bot on port ${BOT_PORT}`);
+    console.log(`[WebRTC API] New call: ${callId}, checking gateway at ${GATEWAY_URL}`);
 
-    // Verify the bot is running
+    // Verify the gateway is running
     try {
-      await fetch(`http://localhost:${BOT_PORT}/`, { signal: AbortSignal.timeout(2000) });
+      await fetch(`${GATEWAY_URL}/health`, { signal: AbortSignal.timeout(2000) });
     } catch {
       return NextResponse.json(
-        { error: "WebRTC bot is not running. Start it with: start.sh --webrtc --port 9000" },
+        { error: "Gateway is not running. Start the ChiefVoice gateway first." },
         { status: 503 }
       );
     }
@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
     const proto = request.headers.get("x-forwarded-proto") || (request.url.startsWith("https") ? "https" : "http");
     const host = request.headers.get("host") || "localhost:3000";
     const signalingUrl = `${proto}://${host}/api/pipecat/webrtc/offer`;
-    console.log(`[WebRTC API] Signaling URL: ${signalingUrl} (proxying to localhost:${BOT_PORT})`);
+    console.log(`[WebRTC API] Signaling URL: ${signalingUrl} (proxying to gateway)`);
 
     return NextResponse.json({
       signaling_url: signalingUrl,

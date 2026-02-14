@@ -4,6 +4,7 @@ import type { NextConfig } from "next";
 const isStaticBuild = process.env.BUILD_TARGET === 'ios' || process.env.TAURI_ENV_PLATFORM !== undefined;
 
 const nextConfig: NextConfig = {
+  compress: true,
   // Exclude backend from file tracing
   outputFileTracingExcludes: {
     '*': ['./backend/**', './backend/venv/**']

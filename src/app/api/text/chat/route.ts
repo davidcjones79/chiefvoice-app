@@ -95,7 +95,9 @@ export async function POST(request: NextRequest) {
 
     // Determine session key from call ID or create new one
     const callId = body.callId || `text_${Date.now()}`;
-    const sessionKey = `agent:voice:main`; // Use same voice agent for consistency
+    // Scope session key by tenant_id (from middleware headers)
+    const tenantId = request.headers.get("x-tenant-id") || "default";
+    const sessionKey = `agent:voice:${tenantId}:main`;
     const mode = body.mode || 'casual';
     const responseFormat = body.responseFormat || 'default';
     const customPrompt = body.customPrompt;

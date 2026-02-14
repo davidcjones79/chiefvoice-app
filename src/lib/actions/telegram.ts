@@ -3,8 +3,26 @@
 import { ActionPlan, Action } from './types';
 import { storeMessageMapping } from './store';
 
+// Per-tenant Telegram config — falls back to env vars for default tenant
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// Cache for per-tenant Telegram config loaded from gateway
+const tenantTelegramConfig: Map<string, { botToken: string; chatId: string }> = new Map();
+
+export async function loadTenantTelegramConfig(tenantId: string): Promise<{ botToken: string; chatId: string } | null> {
+  if (tenantTelegramConfig.has(tenantId)) {
+    return tenantTelegramConfig.get(tenantId)!;
+  }
+  // For default tenant, use env vars
+  if (tenantId === "default" && TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+    const config = { botToken: TELEGRAM_BOT_TOKEN, chatId: TELEGRAM_CHAT_ID };
+    tenantTelegramConfig.set(tenantId, config);
+    return config;
+  }
+  // TODO: Load from gateway API per-tenant config endpoint
+  return null;
+}
 
 interface TelegramMessage {
   chat_id?: string;

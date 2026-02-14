@@ -1,53 +1,71 @@
-import Database from "better-sqlite3";
-import path from "path";
-import fs from "fs";
+/**
+ * Database layer — Postgres client for call/transcript storage.
+ *
+ * Replaces the previous better-sqlite3 implementation.
+ * Queries include tenant_id for multi-tenant isolation.
+ */
+import { Pool } from "pg";
 
-const DB_PATH = process.env.CHIEF_DB_PATH || path.join(process.cwd(), "data", "chief.db");
+const DATABASE_URL = process.env.CHIEFVOICE_DB_URL || process.env.DATABASE_URL || "";
 
-let db: Database.Database | null = null;
+let pool: Pool | null = null;
 
-export function getDb(): Database.Database {
-  if (!db) {
-    // Ensure data directory exists
-    const dir = path.dirname(DB_PATH);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+function getPool(): Pool {
+  if (!pool) {
+    if (!DATABASE_URL) {
+      throw new Error(
+        "Database not configured. Set CHIEFVOICE_DB_URL or DATABASE_URL."
+      );
     }
-
-    db = new Database(DB_PATH);
-    db.pragma("journal_mode = WAL");
-    initSchema(db);
+    pool = new Pool({
+      connectionString: DATABASE_URL,
+      max: 10,
+    });
   }
-  return db;
+  return pool;
 }
 
-function initSchema(db: Database.Database): void {
-  db.exec(`
+/**
+ * Initialize schema in the current tenant's Postgres schema.
+ * Called once on first connection. Tables may already exist from provisioning.
+ */
+export async function initSchema(tenantSchema?: string): Promise<void> {
+  const p = getPool();
+  const schema = tenantSchema || "public";
+
+  await p.query(`
+    SET search_path TO ${schema}, public;
+
     CREATE TABLE IF NOT EXISTS calls (
       id TEXT PRIMARY KEY,
-      started_at INTEGER NOT NULL,
-      ended_at INTEGER,
+      tenant_id TEXT,
+      started_at BIGINT NOT NULL,
+      ended_at BIGINT,
       duration_seconds INTEGER,
       session_key TEXT,
-      created_at INTEGER DEFAULT (unixepoch())
+      created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::bigint)
     );
 
     CREATE TABLE IF NOT EXISTS transcripts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id BIGSERIAL PRIMARY KEY,
       call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
       role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
       text TEXT NOT NULL,
-      timestamp INTEGER NOT NULL,
-      created_at INTEGER DEFAULT (unixepoch())
+      timestamp BIGINT NOT NULL,
+      created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::bigint)
     );
 
     CREATE INDEX IF NOT EXISTS idx_transcripts_call_id ON transcripts(call_id);
     CREATE INDEX IF NOT EXISTS idx_calls_started_at ON calls(started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_calls_tenant ON calls(tenant_id);
+
+    SET search_path TO public;
   `);
 }
 
 export interface CallRow {
   id: string;
+  tenant_id: string | null;
   started_at: number;
   ended_at: number | null;
   duration_seconds: number | null;
@@ -64,21 +82,33 @@ export interface TranscriptRow {
   created_at: number;
 }
 
-export function createCall(id: string, startedAt: number, sessionKey?: string): void {
-  const db = getDb();
-  db.prepare(
-    "INSERT INTO calls (id, started_at, session_key) VALUES (?, ?, ?)"
-  ).run(id, startedAt, sessionKey || null);
+export function createCall(
+  id: string,
+  startedAt: number,
+  sessionKey?: string,
+  tenantId?: string
+): Promise<void> {
+  const p = getPool();
+  return p
+    .query(
+      "INSERT INTO calls (id, started_at, session_key, tenant_id) VALUES ($1, $2, $3, $4)",
+      [id, startedAt, sessionKey || null, tenantId || null]
+    )
+    .then(() => {});
 }
 
-export function endCall(id: string, endedAt: number): void {
-  const db = getDb();
-  const call = db.prepare("SELECT started_at FROM calls WHERE id = ?").get(id) as { started_at: number } | undefined;
-  if (call) {
-    const duration = Math.round((endedAt - call.started_at) / 1000);
-    db.prepare(
-      "UPDATE calls SET ended_at = ?, duration_seconds = ? WHERE id = ?"
-    ).run(endedAt, duration, id);
+export async function endCall(id: string, endedAt: number): Promise<void> {
+  const p = getPool();
+  const result = await p.query(
+    "SELECT started_at FROM calls WHERE id = $1",
+    [id]
+  );
+  if (result.rows[0]) {
+    const duration = Math.round((endedAt - result.rows[0].started_at) / 1000);
+    await p.query(
+      "UPDATE calls SET ended_at = $1, duration_seconds = $2 WHERE id = $3",
+      [endedAt, duration, id]
+    );
   }
 }
 
@@ -87,33 +117,51 @@ export function addTranscript(
   role: "user" | "assistant",
   text: string,
   timestamp: number
-): void {
-  const db = getDb();
-  db.prepare(
-    "INSERT INTO transcripts (call_id, role, text, timestamp) VALUES (?, ?, ?, ?)"
-  ).run(callId, role, text, timestamp);
+): Promise<void> {
+  const p = getPool();
+  return p
+    .query(
+      "INSERT INTO transcripts (call_id, role, text, timestamp) VALUES ($1, $2, $3, $4)",
+      [callId, role, text, timestamp]
+    )
+    .then(() => {});
 }
 
-export function getCalls(limit = 50): CallRow[] {
-  const db = getDb();
-  return db.prepare(
-    "SELECT * FROM calls ORDER BY started_at DESC LIMIT ?"
-  ).all(limit) as CallRow[];
+export async function getCalls(
+  limit = 50,
+  tenantId?: string
+): Promise<CallRow[]> {
+  const p = getPool();
+  if (tenantId) {
+    const result = await p.query(
+      "SELECT * FROM calls WHERE tenant_id = $1 ORDER BY started_at DESC LIMIT $2",
+      [tenantId, limit]
+    );
+    return result.rows;
+  }
+  const result = await p.query(
+    "SELECT * FROM calls ORDER BY started_at DESC LIMIT $1",
+    [limit]
+  );
+  return result.rows;
 }
 
-export function getCall(id: string): CallRow | undefined {
-  const db = getDb();
-  return db.prepare("SELECT * FROM calls WHERE id = ?").get(id) as CallRow | undefined;
+export async function getCall(id: string): Promise<CallRow | undefined> {
+  const p = getPool();
+  const result = await p.query("SELECT * FROM calls WHERE id = $1", [id]);
+  return result.rows[0];
 }
 
-export function getTranscripts(callId: string): TranscriptRow[] {
-  const db = getDb();
-  return db.prepare(
-    "SELECT * FROM transcripts WHERE call_id = ? ORDER BY timestamp ASC"
-  ).all(callId) as TranscriptRow[];
+export async function getTranscripts(callId: string): Promise<TranscriptRow[]> {
+  const p = getPool();
+  const result = await p.query(
+    "SELECT * FROM transcripts WHERE call_id = $1 ORDER BY timestamp ASC",
+    [callId]
+  );
+  return result.rows;
 }
 
-export function deleteCall(id: string): void {
-  const db = getDb();
-  db.prepare("DELETE FROM calls WHERE id = ?").run(id);
+export async function deleteCall(id: string): Promise<void> {
+  const p = getPool();
+  await p.query("DELETE FROM calls WHERE id = $1", [id]);
 }

@@ -164,17 +164,41 @@ export class ChiefVoiceGateway {
   }
 }
 
-// Singleton for the app
+// Per-tenant gateway instances
+const gatewayInstances: Map<string, ChiefVoiceGateway> = new Map();
+
+// Default instance (backward compat)
 let gatewayInstance: ChiefVoiceGateway | null = null;
 
-export function getGateway(): ChiefVoiceGateway | null {
+export function getGateway(tenantId?: string): ChiefVoiceGateway | null {
+  if (tenantId) {
+    return gatewayInstances.get(tenantId) || null;
+  }
   return gatewayInstance;
 }
 
-export function initGateway(options: GatewayClientOptions): ChiefVoiceGateway {
+export function initGateway(options: GatewayClientOptions, tenantId?: string): ChiefVoiceGateway {
+  if (tenantId) {
+    const existing = gatewayInstances.get(tenantId);
+    if (existing) {
+      existing.disconnect();
+    }
+    const gw = new ChiefVoiceGateway(options);
+    gatewayInstances.set(tenantId, gw);
+    return gw;
+  }
   if (gatewayInstance) {
     gatewayInstance.disconnect();
   }
   gatewayInstance = new ChiefVoiceGateway(options);
   return gatewayInstance;
+}
+
+export function disconnectAllGateways(): void {
+  gatewayInstances.forEach((gw) => gw.disconnect());
+  gatewayInstances.clear();
+  if (gatewayInstance) {
+    gatewayInstance.disconnect();
+    gatewayInstance = null;
+  }
 }

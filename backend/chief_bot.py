@@ -230,6 +230,11 @@ CHIEFVOICE_GATEWAY_URL = os.getenv("CHIEFVOICE_GATEWAY_URL", "ws://localhost:187
 CHIEFVOICE_GATEWAY_TOKEN = os.getenv("CHIEFVOICE_GATEWAY_TOKEN")
 USE_GATEWAY = os.getenv("USE_GATEWAY", "false").lower() == "true"
 
+# Multi-tenancy configuration
+TENANT_ID = os.getenv("TENANT_ID", "default")
+PERSONA_NAME = os.getenv("PERSONA_NAME", "Chief")
+PERSONA_USER = os.getenv("PERSONA_USER", "David")
+
 # WebRTC mode configuration
 WEBRTC_MODE = os.getenv("WEBRTC_MODE", "false").lower() == "true" or "--webrtc" in sys.argv
 WEBRTC_PORT = int(os.getenv("WEBRTC_PORT", "9000"))
@@ -263,11 +268,12 @@ class ChiefVoiceGatewayClient:
     Used OUTSIDE the Pipecat pipeline to avoid StartFrame issues.
     """
 
-    def __init__(self, gateway_url: str, token: str, call_id: str = None):
+    def __init__(self, gateway_url: str, token: str, call_id: str = None, tenant_id: str = "default"):
         self.gateway_url = gateway_url
         self.token = token
         self.call_id = call_id or f"pipecat-{int(asyncio.get_event_loop().time())}"
-        self.session_key = f"agent:voice:chief-voice-{self.call_id}"
+        self.tenant_id = tenant_id
+        self.session_key = f"agent:voice:{tenant_id}:{self.call_id}"
         self.ws = None
         self.connected = False
         self.request_counter = 0
@@ -553,9 +559,10 @@ async def main():
         gateway_client = ChiefVoiceGatewayClient(
             gateway_url=CHIEFVOICE_GATEWAY_URL,
             token=CHIEFVOICE_GATEWAY_TOKEN,
-            call_id=call_id
+            call_id=call_id,
+            tenant_id=TENANT_ID,
         )
-        logger.info("✅ Gateway client configured (will intercept messages)")
+        logger.info(f"✅ Gateway client configured (tenant: {TENANT_ID})")
 
     # Load TOOLS.md for integration context
     tools_context = ""
@@ -572,12 +579,12 @@ async def main():
     llm_messages = [
         {
             "role": "system",
-            "content": f"""You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+            "content": f"""You are {PERSONA_NAME}, {PERSONA_USER}'s AI chief of staff, speaking via the ChiefVoice voice interface.
 Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
 
 You have access to forty-three tools across nine integrations including Gmail, Google Calendar, Pipedrive CRM, Todoist, Notion, GitHub, Confluence, and VAPI for outbound calls.
 
-When David asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
+When {PERSONA_USER} asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
 {tools_context}"""
         }
     ]
@@ -959,11 +966,11 @@ When David asks you to do something — check email, look at calendar, update CR
         # Different greeting for outbound (AI-initiated) calls
         if OUTBOUND_MODE:
             urgency_prefix = {
-                "low": "Hey Dave,",
-                "medium": "Hey Dave,",
-                "high": "Dave,",
-                "critical": "Dave, this is urgent."
-            }.get(OUTBOUND_URGENCY, "Hey Dave,")
+                "low": f"Hey {PERSONA_USER},",
+                "medium": f"Hey {PERSONA_USER},",
+                "high": f"{PERSONA_USER},",
+                "critical": f"{PERSONA_USER}, this is urgent."
+            }.get(OUTBOUND_URGENCY, f"Hey {PERSONA_USER},")
 
             greeting = f"{urgency_prefix} I'm calling because {OUTBOUND_REASON}."
             if OUTBOUND_CONTEXT:
@@ -978,7 +985,7 @@ When David asks you to do something — check email, look at calendar, update CR
                         logger.error(f"Failed to send outbound context: {e}")
             logger.info(f"📞 Outbound call - Reason: {OUTBOUND_REASON}, Urgency: {OUTBOUND_URGENCY}")
         else:
-            greeting = "Hey David. What can I help you with?"
+            greeting = f"Hey {PERSONA_USER}. What can I help you with?"
 
         logger.info(f"💬 Sending greeting: {greeting}")
 
@@ -1151,6 +1158,7 @@ async def main_webrtc():
             gateway_url=CHIEFVOICE_GATEWAY_URL,
             token=CHIEFVOICE_GATEWAY_TOKEN,
             call_id=call_id,
+            tenant_id=TENANT_ID,
         )
 
     tools_context = ""
@@ -1207,15 +1215,15 @@ async def main_webrtc():
 
             # Fresh message history per connection
             if gateway_client:
-                system_prompt = f"""You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+                system_prompt = f"""You are {PERSONA_NAME}, {PERSONA_USER}'s AI chief of staff, speaking via the ChiefVoice voice interface.
 Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
 
 You have access to forty-three tools across nine integrations including Gmail, Google Calendar, Pipedrive CRM, Todoist, Notion, GitHub, Confluence, and VAPI for outbound calls.
 
-When David asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
+When {PERSONA_USER} asks you to do something — check email, look at calendar, update CRM, make a call — just do it.
 {tools_context}"""
             else:
-                system_prompt = """You are Chief, David Jones' AI chief of staff, speaking via the ChiefVoice voice interface.
+                system_prompt = f"""You are {PERSONA_NAME}, {PERSONA_USER}'s AI chief of staff, speaking via the ChiefVoice voice interface.
 Keep responses concise and natural since they will be spoken aloud. Use short sentences. Pause naturally.
 
 You are running in local-only mode without any tool integrations. You can have conversations, answer questions, brainstorm, and help think through problems — but you CANNOT access email, calendar, CRM, or any external services. If asked to do something that requires tools, honestly say you're not connected to those services right now."""
@@ -1248,7 +1256,7 @@ You are running in local-only mode without any tool integrations. You can have c
             async def on_client_connected(transport_obj, client):
                 logger.info(f"🎉 WebRTC client connected")
                 await asyncio.sleep(0.5)
-                greeting = "Hey David. What can I help you with?"
+                greeting = f"Hey {PERSONA_USER}. What can I help you with?"
                 await task.queue_frame(TTSSpeakFrame(text=greeting))
 
             @transport.event_handler("on_client_disconnected")

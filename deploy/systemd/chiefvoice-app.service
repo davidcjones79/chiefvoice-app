@@ -1,0 +1,26 @@
+[Unit]
+Description=ChiefVoice App (Next.js Frontend)
+After=network.target chiefvoice.service
+
+[Service]
+Type=simple
+User=david
+Group=david
+WorkingDirectory=/home/david/development/chiefvoice-app
+Environment="PATH=/home/david/development/chiefvoice-app/node_modules/.bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+PrivateTmp=true
+ReadWritePaths=/home/david/development/chiefvoice-app
+
+[Install]
+WantedBy=multi-user.target

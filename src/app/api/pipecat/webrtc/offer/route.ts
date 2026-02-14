@@ -3,30 +3,30 @@ import { NextRequest, NextResponse } from "next/server";
 /**
  * HTTPS proxy for SmallWebRTC SDP signaling.
  *
- * The bot's aiohttp server runs on plain HTTP (localhost:BOT_PORT/offer).
- * The browser can't call HTTP from an HTTPS page (mixed content).
- * This route proxies the SDP exchange so everything stays HTTPS.
+ * Proxies SDP offer/answer exchange to the ChiefVoice gateway's
+ * /api/voice/offer endpoint. This avoids mixed-content blocks when
+ * the frontend runs over HTTPS.
  *
  * SmallWebRTCTransport sends:
  *   POST  /offer — SDP offer/answer exchange
  *   PATCH /offer — ICE candidate trickle
  */
 
-const BOT_PORT = parseInt(process.env.WEBRTC_BOT_PORT || "9000", 10);
+const GATEWAY_URL = process.env.CHIEFVOICE_GATEWAY_HTTP_URL || "http://localhost:8000";
 
-async function proxyToBot(request: NextRequest, method: string) {
+async function proxyToGateway(request: NextRequest, method: string) {
   try {
     const body = await request.text();
-    console.log(`[WebRTC Offer Proxy] ${method} → localhost:${BOT_PORT}/offer (${body.length} bytes)`);
+    console.log(`[WebRTC Offer Proxy] ${method} → ${GATEWAY_URL}/api/voice/offer (${body.length} bytes)`);
 
-    const res = await fetch(`http://localhost:${BOT_PORT}/offer`, {
+    const res = await fetch(`${GATEWAY_URL}/api/voice/offer`, {
       method,
       headers: { "Content-Type": "application/json" },
       body,
     });
 
     const answer = await res.text();
-    console.log(`[WebRTC Offer Proxy] Bot responded ${res.status} (${answer.length} bytes)`);
+    console.log(`[WebRTC Offer Proxy] Gateway responded ${res.status} (${answer.length} bytes)`);
 
     return new NextResponse(answer, {
       status: res.status,
@@ -42,9 +42,9 @@ async function proxyToBot(request: NextRequest, method: string) {
 }
 
 export async function POST(request: NextRequest) {
-  return proxyToBot(request, "POST");
+  return proxyToGateway(request, "POST");
 }
 
 export async function PATCH(request: NextRequest) {
-  return proxyToBot(request, "PATCH");
+  return proxyToGateway(request, "PATCH");
 }
